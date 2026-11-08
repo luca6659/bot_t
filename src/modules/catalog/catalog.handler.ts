@@ -1,70 +1,81 @@
-// Каталог и поиск для покупателя. Выбор размера и цвета хранится прямо в данных кнопок.
+// Каталог, поиск и хиты: карточка модельки с фото-галереей и листанием по списку.
 import { Composer, InlineKeyboard } from "grammy";
 import type { ListRef, MyContext } from "../../bot/context.js";
 import { t } from "../../i18n/texts.js";
-import { NotFoundError, ValidationError } from "../../infrastructure/errors.js";
+import { NotFoundError } from "../../infrastructure/errors.js";
 import { logAction } from "../../infrastructure/logger.js";
 import { esc, formatRub } from "../../views/format.js";
-import { action, cancelKb, navRow, pagerRow, show } from "../../views/screen.js";
+import { action, cancelKb, navRow, show } from "../../views/screen.js";
 import type { CartRepository } from "../cart/cart.repository.js";
-import { PAGE_SIZE, type CatalogRepository, type Page, type Product } from "./catalog.repository.js";
+import type { SettingsService } from "../settings/settings.service.js";
+import type { CatalogRepository, Product } from "./catalog.repository.js";
 
-const NOT_SELECTED = -1;
-
-function productCaption(p: Product, size: number, color: number): string {
-  const lines = [`<b>${esc(p.name)}</b>`, `💰 ${formatRub(p.price)}`];
-  if (p.description) lines.push("", esc(p.description));
-  if (p.sizes.length) lines.push("", `📏 Размер: ${p.sizes[size] ? `<b>${esc(p.sizes[size]!)}</b>` : "выбери ниже"}`);
-  if (p.colors.length) lines.push(`🎨 Цвет: ${p.colors[color] ? `<b>${esc(p.colors[color]!)}</b>` : "выбери ниже"}`);
-  return lines.join("\n");
-}
-
-function optionRows(
-  kb: InlineKeyboard,
-  options: string[],
-  selected: number,
-  data: (index: number) => string,
-): void {
-  options.forEach((option, i) => {
-    if (i > 0 && i % 3 === 0) kb.row();
-    kb.text(i === selected ? `✅ ${option}` : option, data(i));
-  });
-  if (options.length) kb.row();
-}
-
-export function createCatalogComposer(catalog: CatalogRepository, cart: CartRepository): Composer<MyContext> {
+export function createCatalogComposer(
+  catalog: CatalogRepository,
+  cart: CartRepository,
+  settings: SettingsService,
+): Composer<MyContext> {
   const composer = new Composer<MyContext>();
 
-  function listBackData(list: ListRef | null): string {
-    if (list?.type === "search") return `sr:${list.page}`;
-    if (list?.type === "category") return `c:${list.id}:${list.page}`;
-    return "cat";
+  function backData(list: ListRef | null): string {
+    if (list?.type === "category") return "cat";
+    if (list?.type === "search") return "s";
+    return "m";
   }
 
-  function productListKb(result: Page<Product>, page: number, pageData: (p: number) => string, back: string) {
-    const kb = new InlineKeyboard();
-    for (const p of result.items) kb.text(`${p.name} · ${formatRub(p.price)}`, `p:${p.id}:${NOT_SELECTED}:${NOT_SELECTED}`).row();
-    pagerRow(kb, page, Math.ceil(result.total / PAGE_SIZE), pageData);
-    return navRow(kb, back);
+  function caption(p: Product): string {
+    const badges = `${p.isHit ? " 🔥 Хит" : ""}${p.isNew ? " 🆕 Новинка" : ""}`;
+    const lines = [
+      `<b>${esc(p.name)}</b>${badges}`,
+      `💰 ${formatRub(p.price)} · ${t(p.stock === "in_stock" ? "catalog.in_stock" : "catalog.on_order")}`,
+    ];
+    if (p.description) lines.push("", esc(p.description));
+    return lines.join("\n");
   }
 
-  async function showProduct(ctx: MyContext, id: number, size: number, color: number, keepPhoto: boolean) {
-    const p = await catalog.product(id);
-    if (!p || !p.active) throw new NotFoundError(`product ${id}`, "Этой игрушки уже нет в продаже.");
-
-    // Если вариант один, выбирать нечего.
-    const s = size === NOT_SELECTED && p.sizes.length === 1 ? 0 : size;
-    const c = color === NOT_SELECTED && p.colors.length === 1 ? 0 : color;
+  async function showProduct(ctx: MyContext, p: Product, photoIdx: number, keepPhoto = false): Promise<void> {
+    if (!p.active) throw new NotFoundError(`product ${p.id}`, "Этой игрушки уже нет в продаже.");
+    const idx = p.photos.length ? ((photoIdx % p.photos.length) + p.photos.length) % p.photos.length : 0;
 
     const kb = new InlineKeyboard();
-    optionRows(kb, p.sizes, s, (i) => `p:${id}:${i}:${c}`);
-    optionRows(kb, p.colors, c, (i) => `p:${id}:${s}:${i}`);
-    kb.text(t("btn.add_to_cart"), `add:${id}:${s}:${c}`).row();
+    if (p.photos.length > 1) {
+      kb.text("⬅️", `ph:${p.id}:${idx - 1}`).text(`${idx + 1}/${p.photos.length}`, "noop").text("➡️", `ph:${p.id}:${idx + 1}`).row();
+    }
+    if (ctx.session.list) {
+      kb.text("⏪", `pp:${p.id}`).text(t("btn.catalog"), backData(ctx.session.list)).text("⏩", `pn:${p.id}`).row();
+    }
+    kb.text(t("btn.add_to_cart"), `add:${p.id}`).row();
     const count = await cart.count(ctx.from!.id);
     if (count > 0) kb.text(`${t("btn.cart")} (${count})`, "cart").row();
-    navRow(kb, listBackData(ctx.session.list));
+    navRow(kb, backData(ctx.session.list));
 
-    await show(ctx, { text: productCaption(p, s, c), kb, photo: p.photo, keepPhoto });
+    await show(ctx, { text: caption(p), kb, photo: p.photos[idx] ?? settings.get("menu_banner") ?? null, keepPhoto });
+  }
+
+  // Открыть список (категория/поиск/хиты) — сразу показываем первую карточку.
+  async function openList(ctx: MyContext, list: ListRef): Promise<void> {
+    const first =
+      list.type === "category"
+        ? (await catalog.byCategory(list.id, 0)).items[0]
+        : list.type === "search"
+          ? (await catalog.search(list.query, 0)).items[0]
+          : (await catalog.hits(0)).items[0];
+
+    if (!first) {
+      const text =
+        list.type === "category"
+          ? t("catalog.category_empty")
+          : list.type === "search"
+            ? t("search.empty", { query: esc(list.query) })
+            : t("catalog.hits_empty");
+      const kb = new InlineKeyboard().text(t("btn.custom"), "cu").row();
+      if (list.type === "search") kb.text(t("btn.search"), "s").row();
+      const photo = list.type === "category" ? (await catalog.category(list.id))?.photo : null;
+      return show(ctx, { text, kb: navRow(kb, backData(list)), photo: photo ?? settings.get("menu_banner") ?? null });
+    }
+
+    ctx.session.list = list;
+    await showProduct(ctx, first, 0);
   }
 
   action(composer, "cat", async (ctx) => {
@@ -73,40 +84,48 @@ export function createCatalogComposer(catalog: CatalogRepository, cart: CartRepo
       return show(ctx, { text: t("catalog.empty"), kb: navRow(new InlineKeyboard(), "m") });
     }
     const kb = new InlineKeyboard();
-    for (const c of categories) kb.text(c.name, `c:${c.id}:0`).row();
-    await show(ctx, { text: t("catalog.title"), kb: navRow(kb, "m") });
+    for (const c of categories) kb.text(`🧸 ${c.name}`, `c:${c.id}`).row();
+    await show(ctx, { text: t("catalog.title"), kb: navRow(kb, "m"), photo: settings.get("menu_banner") ?? null });
   });
 
-  action(composer, /^c:(\d+):(\d+)$/, async (ctx) => {
+  action(composer, /^c:(\d+)$/, async (ctx) => {
     const id = Number(ctx.match[1]);
-    const page = Number(ctx.match[2]);
     const category = await catalog.category(id);
     if (!category || !category.active) throw new NotFoundError(`category ${id}`);
-    ctx.session.list = { type: "category", id, page };
-
-    const result = await catalog.byCategory(id, page);
-    const text = result.total === 0 ? t("catalog.category_empty") : `<b>${esc(category.name)}</b>`;
-    await show(ctx, { text, kb: productListKb(result, page, (p) => `c:${id}:${p}`, "cat") });
+    await openList(ctx, { type: "category", id });
   });
 
-  action(composer, /^p:(\d+):(-?\d+):(-?\d+)$/, async (ctx) => {
-    const fromCard = Boolean(ctx.callbackQuery?.message?.photo);
-    await showProduct(ctx, Number(ctx.match[1]), Number(ctx.match[2]), Number(ctx.match[3]), fromCard);
+  action(composer, /^p:(\d+)$/, async (ctx) => {
+    const p = await catalog.product(Number(ctx.match[1]));
+    if (!p) throw new NotFoundError(`product ${ctx.match[1]}`, "Этой игрушки уже нет в продаже.");
+    await showProduct(ctx, p, 0);
   });
 
-  action(composer, /^add:(\d+):(-?\d+):(-?\d+)$/, async (ctx) => {
-    const id = Number(ctx.match[1]);
-    const size = Number(ctx.match[2]);
-    const color = Number(ctx.match[3]);
-    const p = await catalog.product(id);
-    if (!p || !p.active) throw new NotFoundError(`product ${id}`, "Этой игрушки уже нет в продаже.");
-    if (p.sizes.length && !p.sizes[size]) throw new ValidationError(t("catalog.choose_size"));
-    if (p.colors.length && !p.colors[color]) throw new ValidationError(t("catalog.choose_color"));
+  action(composer, /^ph:(\d+):(-?\d+)$/, async (ctx) => {
+    const p = await catalog.product(Number(ctx.match[1]));
+    if (!p) throw new NotFoundError(`product ${ctx.match[1]}`, "Этой игрушки уже нет в продаже.");
+    await showProduct(ctx, p, Number(ctx.match[2]));
+  });
 
-    await cart.add(ctx.from!.id, id, p.sizes[size] ?? "", p.colors[color] ?? "");
-    logAction("cart.add", ctx, { productId: id });
+  action(composer, /^(pn|pp):(\d+)$/, async (ctx) => {
+    const p = await catalog.product(Number(ctx.match[2]));
+    const list = ctx.session.list;
+    if (!p || !list) throw new NotFoundError(`product ${ctx.match[2]}`);
+    const next = await catalog.neighbor(p, list, ctx.match[1] === "pn" ? 1 : -1);
+    if (!next || next.id === p.id) {
+      await ctx.answerCallbackQuery({ text: "Здесь только эта моделька 🙂" });
+      return;
+    }
+    await showProduct(ctx, next, 0);
+  });
+
+  action(composer, /^add:(\d+)$/, async (ctx) => {
+    const p = await catalog.product(Number(ctx.match[1]));
+    if (!p || !p.active) throw new NotFoundError(`product ${ctx.match[1]}`, "Этой игрушки уже нет в продаже.");
+    await cart.add(ctx.from!.id, p.id);
+    logAction("cart.add", ctx, { productId: p.id });
     await ctx.answerCallbackQuery({ text: t("catalog.added") });
-    await showProduct(ctx, id, size, color, Boolean(ctx.callbackQuery?.message?.photo));
+    await showProduct(ctx, p, 0, true);
   });
 
   action(composer, "s", async (ctx) => {
@@ -114,33 +133,15 @@ export function createCatalogComposer(catalog: CatalogRepository, cart: CartRepo
     await show(ctx, { text: t("search.prompt"), kb: cancelKb() });
   });
 
-  async function showSearch(ctx: MyContext, query: string, page: number): Promise<void> {
-    const result = await catalog.search(query, page);
-    ctx.session.list = { type: "search", page };
-    const safe = esc(query);
-    if (result.total === 0) {
-      const kb = new InlineKeyboard().text(t("btn.search"), "s").row().text(t("btn.custom"), "cu");
-      return show(ctx, { text: t("search.empty", { query: safe }), kb: kb.row().text(t("btn.main"), "m") });
-    }
-    await show(ctx, {
-      text: t("search.results", { query: safe }),
-      kb: productListKb(result, page, (p) => `sr:${p}`, "s"),
-    });
-  }
-
-  action(composer, /^sr:(\d+)$/, async (ctx) => {
-    if (!ctx.session.query) throw new ValidationError("Запрос устарел. Начни поиск заново.");
-    await showSearch(ctx, ctx.session.query, Number(ctx.match[1]));
-  });
+  action(composer, "hits", (ctx) => openList(ctx, { type: "hits" }));
 
   composer.chatType("private").on("message", async (ctx, next) => {
     if (ctx.session.flow?.kind !== "search") return next();
     const query = ctx.msg.text?.trim();
     if (!query) return ctx.reply(t("search.prompt"), { reply_markup: cancelKb() });
     ctx.session.flow = null;
-    ctx.session.query = query.slice(0, 100);
-    logAction("catalog.search", ctx, { query: ctx.session.query });
-    await showSearch(ctx, ctx.session.query, 0);
+    logAction("catalog.search", ctx, { query: query.slice(0, 100) });
+    await openList(ctx, { type: "search", query: query.slice(0, 100) });
   });
 
   return composer;

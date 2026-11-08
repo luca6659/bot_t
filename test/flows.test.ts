@@ -9,59 +9,58 @@ async function buyToCart(h: Harness, user: number): Promise<void> {
   await h.say(user, "/start");
   await h.press(user, /Каталог/);
   await h.press(user, /Животные/);
-  await h.press(user, /Дракон/);
-  await h.press(user, /^15 см$/);
-  await h.press(user, /^зелёный$/);
   await h.press(user, /В корзину/);
 }
 
+// Самовывоз: имя → телефон → способ → комментарий → подтверждение.
 async function checkoutPickup(h: Harness, user: number): Promise<void> {
   await h.press(user, /Корзина/);
   await h.press(user, /Оформить/);
-  await h.press(user, /Самовывоз/);
   await h.say(user, "Анна Иванова");
   await h.say(user, "+7 900 123-45-67");
+  await h.press(user, /Самовывоз/);
+  await h.press(user, /Пропустить/);
   await h.press(user, /Подтвердить/);
 }
 
-function adminCard(h: Harness, user: number) {
-  return h.topicOf(user);
-}
-
-test("покупка с курьером от каталога до выполнения, с уведомлениями на каждом статусе", () =>
+test("покупка с курьером от каталога до выполнения, с уведомлениями и фото на каждом статусе", () =>
   withHarness(async (h) => {
-    await h.addProduct({ name: "Дракон", price: "1 500", sizes: "10 см, 15 см", colors: "белый, зелёный" });
+    await h.addProduct({ name: "Дракон", price: "1 500" });
     await buyToCart(h, ANNA);
 
-    // Выбор и счётчик корзины
+    // Счётчик корзины
     assert.match(h.findButton(ANNA, /Корзина \(1\)/).data, /cart/);
     await h.press(ANNA, /Корзина/);
-    assert.match(h.lastText(ANNA), /Дракон \(15 см, зелёный\): 1 × 1\s500 ₽/u);
+    assert.match(h.lastText(ANNA), /Дракон: 1 × 1\s500 ₽/u);
     await h.press(ANNA, /➕/);
     assert.match(h.lastText(ANNA), /Итого: <b>3\s000 ₽<\/b>/u);
 
-    // Оформление
+    // Оформление: имя → телефон → доставка → адрес → комментарий
     await h.press(ANNA, /Оформить/);
-    assert.match(h.lastText(ANNA), /Шаг 1 из 4/);
-    await h.press(ANNA, /Яндекс курьер/);
-    assert.match(h.lastText(ANNA), /Шаг 2 из 4/);
+    assert.match(h.lastText(ANNA), /Шаг 1 из 5/);
     await h.say(ANNA, "А");
     assert.match(h.lastText(ANNA), /слишком коротким/);
     await h.say(ANNA, "Анна Иванова");
+    assert.match(h.lastText(ANNA), /Шаг 2 из 5/);
     await h.say(ANNA, "телефон");
     assert.match(h.lastText(ANNA), /разобрать номер/);
     await h.say(ANNA, { contact: { phone_number: "79001234567", first_name: "Анна", user_id: ANNA } });
-    assert.match(h.lastText(ANNA), /Шаг 4 из 4/);
+    assert.match(h.lastText(ANNA), /Шаг 3 из 5/);
+    await h.press(ANNA, /Яндекс.Курьер/);
+    assert.match(h.lastText(ANNA), /Шаг 4 из 5/);
     await h.say(ANNA, "Москва, Тверская, 1 <кв. 5>");
+    assert.match(h.lastText(ANNA), /Шаг 5 из 5/);
+    await h.say(ANNA, "Позвонить заранее");
     assert.match(h.lastText(ANNA), /&lt;кв\. 5&gt;/);
+    assert.match(h.lastText(ANNA), /Комментарий: Позвонить заранее/);
     await h.press(ANNA, /Подтвердить/);
     assert.match(h.lastText(ANNA), /Считаем стоимость доставки/);
+    assert.ok(h.texts(GROUP).some((t) => t.includes("Новый заказ №1001")), "уведомление в тему «Заказы»");
 
     // Админ считает доставку и бот выставляет счёт
-    const thread = await adminCard(h, ANNA);
+    const thread = await h.topicOf(ANNA);
     assert.ok(thread);
-    assert.match(h.lastText(GROUP), /Нужно указать стоимость доставки|Заказ №1001/);
-    await h.press(GROUP, /Реквизиты|стоимость доставки/, ADMIN);
+    await h.press(GROUP, /стоимость доставки/, ADMIN);
     await h.adminSay("дорого", thread);
     assert.match(h.lastText(GROUP), /числом/);
     await h.adminSay("350", thread);
@@ -86,10 +85,13 @@ test("покупка с курьером от каталога до выполн
     assert.ok(h.calls.some((c) => c.method === "sendDocument" && c.payload.document === "receipt2"));
     await h.press(GROUP, /Оплата подтверждена/, ADMIN);
     assert.match(h.lastText(ANNA), /Оплата заказа №1001 подтверждена/);
-    await h.press(GROUP, /В печать/, ADMIN);
-    assert.match(h.lastText(ANNA), /пошёл в печать/);
-    await h.press(GROUP, /Готов/, ADMIN);
-    assert.match(h.lastText(ANNA), /уедет с курьером/);
+
+    // У каталога сборка, а не печать; уведомление приходит с фото модельки
+    await h.press(GROUP, /Собирается/, ADMIN);
+    const assembling = h.calls.findLast((c) => c.method === "sendPhoto" && c.payload.chat_id === ANNA)!;
+    assert.match(assembling.payload.caption, /собирается/);
+    assert.equal(assembling.payload.photo, "photo-Дракон");
+
     await h.press(GROUP, /Передан курьеру/, ADMIN);
     await h.adminSay("https://dostavka.yandex.ru/track/1", thread);
     assert.match(h.lastText(ANNA), /Отслеживание: https:\/\/dostavka/);
@@ -99,7 +101,7 @@ test("покупка с курьером от каталога до выполн
 
     const { rows } = await h.db.query(`SELECT status FROM order_status_history WHERE order_id = 1001 ORDER BY id`);
     assert.deepEqual(rows.map((r) => r.status), [
-      "new", "awaiting_payment", "receipt_check", "awaiting_payment", "receipt_check", "paid", "printing", "ready", "courier", "done",
+      "new", "awaiting_payment", "receipt_check", "awaiting_payment", "receipt_check", "paid", "assembling", "courier", "done",
     ]);
     const cart = await h.db.query(`SELECT 1 FROM cart_items WHERE user_id = $1`, [ANNA]);
     assert.equal(cart.rows.length, 0);
@@ -107,7 +109,7 @@ test("покупка с курьером от каталога до выполн
 
 test("самовывоз: счёт сразу, реквизиты из админки, контакты запоминаются, повторное подтверждение не создаёт заказ", () =>
   withHarness(async (h) => {
-    await h.addProduct({ name: "Дракон", price: "100", sizes: "15 см", colors: "зелёный", photo: false });
+    await h.addProduct({ name: "Дракон", price: "100", photo: false });
     await h.adminSay("/admin");
     await h.press(GROUP, /Тексты/, ADMIN);
     await h.press(GROUP, /Реквизиты/, ADMIN);
@@ -116,9 +118,6 @@ test("самовывоз: счёт сразу, реквизиты из адми�
     await h.say(ANNA, "/start");
     await h.press(ANNA, /Каталог/);
     await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    // Единственный вариант выбран сам
-    assert.match(h.lastText(ANNA), /<b>15 см<\/b>/);
     await h.press(ANNA, /В корзину/);
     await checkoutPickup(h, ANNA);
 
@@ -134,19 +133,17 @@ test("самовывоз: счёт сразу, реквизиты из адми�
 
     // Второй заказ предлагает прошлые контакты
     await h.press(ANNA, /Главное меню/);
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /В корзину/);
+    await buyToCart(h, ANNA);
     await h.press(ANNA, /Корзина/);
     await h.press(ANNA, /Оформить/);
-    await h.press(ANNA, /Самовывоз/);
     await h.press(ANNA, /Как в прошлый раз: Анна/);
     await h.press(ANNA, /Как в прошлый раз: \+7900/);
+    await h.press(ANNA, /Самовывоз/);
+    await h.press(ANNA, /Пропустить/);
     assert.match(h.lastText(ANNA), /Проверь заказ/);
   }));
 
-test("единая стоимость курьера сразу попадает в счёт", () =>
+test("единая стоимость курьера сразу попадает в счёт, адрес можно прислать геолокацией", () =>
   withHarness(async (h) => {
     await h.addProduct({ name: "Дракон", price: "100", photo: false });
     await h.adminSay("/admin");
@@ -154,25 +151,52 @@ test("единая стоимость курьера сразу попадает
     await h.press(GROUP, /Курьер/, ADMIN);
     await h.adminSay("250");
     await h.say(ANNA, "/start");
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /В корзину/);
+    await buyToCart(h, ANNA);
     await h.press(ANNA, /Корзина/);
     await h.press(ANNA, /Оформить/);
-    await h.press(ANNA, /Яндекс курьер/);
     await h.say(ANNA, "Анна Иванова");
     await h.say(ANNA, "89001234567");
-    await h.say(ANNA, "Москва, Тверская, 1");
+    await h.press(ANNA, /Яндекс.Курьер/);
+    await h.say(ANNA, { location: { latitude: 55.751244, longitude: 37.618423 } });
+    assert.match(h.lastText(ANNA), /Шаг 5 из 5/);
+    await h.press(ANNA, /Пропустить/);
+    assert.match(h.lastText(ANNA), /yandex\.ru\/maps/);
     await h.press(ANNA, /Подтвердить/);
     const invoice = h.texts(ANNA).find((t) => t.includes("Счёт по заказу"))!;
     assert.match(invoice, /350 ₽/);
+    const { rows } = await h.db.query(`SELECT address FROM orders WHERE id = 1001`);
+    assert.match(rows[0]!.address, /55\.751244/);
   }));
 
-test("своя модель: заявка с альбомом, оценка, согласие, прерванное и возобновлённое оформление", () =>
+test("оформление: кнопка «Назад» возвращает на шаг, комментарий можно пропустить", () =>
+  withHarness(async (h) => {
+    await h.addProduct({ name: "Дракон", price: "100", photo: false });
+    await h.say(ANNA, "/start");
+    await buyToCart(h, ANNA);
+    await h.press(ANNA, /Корзина/);
+    await h.press(ANNA, /Оформить/);
+    await h.say(ANNA, "Анна Иванова");
+    await h.say(ANNA, "89001234567");
+    await h.press(ANNA, /Яндекс.Курьер/);
+    assert.match(h.lastText(ANNA), /Шаг 4 из 5/);
+    await h.press(ANNA, /⬅️ Назад/);
+    assert.match(h.lastText(ANNA), /Шаг 3 из 5/);
+    await h.press(ANNA, /Яндекс.Курьер/);
+    await h.say(ANNA, "Москва, Тверская, 1");
+    assert.match(h.lastText(ANNA), /Шаг 5 из 5/);
+    await h.press(ANNA, /⬅️ Назад/);
+    assert.match(h.lastText(ANNA), /Шаг 4 из 5/);
+    await h.say(ANNA, "Москва, Тверская, 1");
+    await h.press(ANNA, /Пропустить/);
+    await h.press(ANNA, /Подтвердить/);
+    const { rows } = await h.db.query(`SELECT comment FROM orders WHERE id = 1001`);
+    assert.equal(rows[0]!.comment, null);
+  }));
+
+test("своя модель: заявка с альбомом, оценка с фото-рендером, согласие, прерванное и возобновлённое оформление", () =>
   withHarness(async (h) => {
     await h.say(ANNA, "/start");
-    await h.press(ANNA, /Заказать свою модель/);
+    await h.press(ANNA, /Своя модель/);
     await h.press(ANNA, /Готово/);
     assert.ok(h.alerts().some((a) => a.includes("Опиши идею")));
     await h.say(ANNA, "Дракон как на фото");
@@ -182,21 +206,26 @@ test("своя модель: заявка с альбомом, оценка, с�
     await h.say(ANNA, ph("ref2"));
     assert.equal(h.texts(ANNA).length, before + 1, "на альбом один ответ");
     await h.press(ANNA, /Готово/);
-    await h.say(ANNA, "15 см");
-    await h.press(ANNA, /Пропустить/);
-    assert.match(h.lastText(ANNA), /Картинок: 2/);
+    await h.say(ANNA, "15 см, зелёный, к пятнице");
+    assert.match(h.lastText(ANNA), /Фото: 2/);
+    assert.match(h.lastText(ANNA), /Пожелания: 15 см, зелёный, к пятнице/);
     await h.press(ANNA, /Подтвердить/);
     assert.match(h.lastText(ANNA), /Заявка №1001/);
     assert.ok(h.calls.some((c) => c.method === "sendPhoto" && c.payload.photo === "ref2" && c.payload.chat_id === GROUP));
+    assert.ok(h.texts(GROUP).some((t) => t.includes("Новая заявка на свою модель №1001")));
 
     const thread = await h.topicOf(ANNA);
     await h.press(GROUP, /Назначить цену и срок/, ADMIN);
     await h.adminSay("2 500", thread);
     await h.adminSay("5 дней", thread);
-    assert.match(h.lastText(ANNA), /Цена: <b>2\s500 ₽<\/b>/u);
+    await h.adminSay({ photo: [{ file_id: "render1", file_unique_id: "rr", width: 1, height: 1 }] }, thread);
+    const quote = h.calls.findLast((c) => c.method === "sendPhoto" && c.payload.chat_id === ANNA)!;
+    assert.equal(quote.payload.photo, "render1", "покупатель видит рендер от продавца");
+    assert.match(quote.payload.caption, /Цена: <b>2\s500 ₽<\/b>/u);
 
     await h.press(ANNA, /Согласен/);
-    await h.press(ANNA, /Самовывоз/);
+    await h.say(ANNA, "Анна Иванова");
+    await h.say(ANNA, "89001234567");
     await h.press(ANNA, /Отмена/);
     assert.equal(h.texts(ANNA).filter((t) => t.includes("Счёт по заказу")).length, 0);
 
@@ -204,34 +233,77 @@ test("своя модель: заявка с альбомом, оценка, с�
     await h.press(ANNA, /Мои заказы/);
     await h.press(ANNA, /№1001/);
     await h.press(ANNA, /Продолжить оформление/);
-    await h.press(ANNA, /Самовывоз/);
     await h.say(ANNA, "Анна Иванова");
     await h.say(ANNA, "89001234567");
+    await h.press(ANNA, /Самовывоз/);
+    await h.press(ANNA, /Пропустить/);
     await h.press(ANNA, /Подтвердить/);
     const invoice = h.texts(ANNA).find((t) => t.includes("Счёт по заказу"))!;
     assert.match(invoice, /2\s500 ₽/u);
+
+    // У своей модели после оплаты — печать
+    await h.press(GROUP, /Оплата подтверждена/, ADMIN);
+    await h.press(GROUP, /В печать/, ADMIN);
+    assert.match(h.lastText(ANNA), /пошёл в печать/);
+    await h.press(GROUP, /Ждёт самовывоза/, ADMIN);
+    assert.match(h.lastText(ANNA), /ждёт тебя на самовывозе/);
+    await h.press(GROUP, /Выдан покупателю/, ADMIN);
+    assert.match(h.lastText(ANNA), /выполнен/);
   }));
 
-test("своя модель: отказ от цены отменяет заявку", () =>
+test("своя модель: «Обсудить» ведёт в переписку, отказ от цены отменяет заявку", () =>
   withHarness(async (h) => {
     await h.say(ANNA, "/start");
-    await h.press(ANNA, /Заказать свою модель/);
+    await h.press(ANNA, /Своя модель/);
     await h.say(ANNA, "Кот");
     await h.press(ANNA, /Готово/);
-    await h.say(ANNA, "10 см");
-    await h.say(ANNA, "чёрный");
+    await h.say(ANNA, "к пятнице");
     await h.press(ANNA, /Подтвердить/);
     const thread = await h.topicOf(ANNA);
     await h.press(GROUP, /Назначить цену/, ADMIN);
     await h.adminSay("9999", thread);
     await h.adminSay("неделя", thread);
+    await h.press(GROUP, /Без фото/, ADMIN);
+
+    await h.press(ANNA, /Обсудить/);
+    await h.say(ANNA, "А если 5 см?");
+    assert.ok(h.calls.some((c) => c.method === "copyMessage" && c.payload.chat_id === GROUP && c.payload.message_thread_id === thread));
+
+    await h.press(ANNA, /Главное меню/);
+    await h.press(ANNA, /Мои заказы/);
+    await h.press(ANNA, /№1001/);
     await h.press(ANNA, /Отказаться/);
     const { rows } = await h.db.query(`SELECT status, cancel_reason FROM orders WHERE id = 1001`);
     assert.equal(rows[0]!.status, "cancelled");
     assert.match(rows[0]!.cancel_reason, /отказался/);
   }));
 
-test("переписка анонимна: только copyMessage, одна тема, заметки не теряются", () =>
+test("антиспам: шестая заявка на свою модель за сутки отклоняется", () =>
+  withHarness(async (h) => {
+    await h.say(ANNA, "/start");
+    for (let i = 0; i < 5; i++) {
+      await h.press(ANNA, /Своя модель/);
+      await h.say(ANNA, `Модель ${i}`);
+      await h.press(ANNA, /Готово/);
+      await h.press(ANNA, /Пропустить/);
+      await h.press(ANNA, /Подтвердить/);
+      await h.press(ANNA, /Главное меню/);
+    }
+    const n = h.alerts().length;
+    await h.press(ANNA, /Своя модель/);
+    assert.equal(h.alerts().length, n + 1);
+    assert.match(h.alerts().at(-1)!, /вернись завтра/);
+  }));
+
+test("фото больше 20 МБ отклоняется с понятным сообщением", () =>
+  withHarness(async (h) => {
+    await h.say(ANNA, "/start");
+    await h.press(ANNA, /Своя модель/);
+    await h.say(ANNA, { photo: [{ file_id: "big", file_unique_id: "big", width: 1, height: 1, file_size: 21 * 1024 * 1024 }] });
+    assert.match(h.lastText(ANNA), /до 20 МБ/);
+  }));
+
+test("переписка анонимна: только copyMessage, одна тема, закреп-карточка клиента", () =>
   withHarness(async (h) => {
     await h.say(ANNA, "Здравствуйте!");
     await h.say(ANNA, { photo: [{ file_id: "p", file_unique_id: "p", width: 1, height: 1 }] });
@@ -241,6 +313,8 @@ test("переписка анонимна: только copyMessage, одна т
     const thread = await h.topicOf(ANNA);
     assert.equal(copies[0]!.payload.message_thread_id, thread);
     assert.equal(h.texts(ANNA).filter((t) => t.includes("Передал")).length, 1, "подтверждение не спамит");
+    assert.ok(h.calls.some((c) => c.method === "pinChatMessage"), "карточка клиента закреплена");
+    assert.ok(h.texts(GROUP).some((t) => t.includes("Отвечай в этой теме")));
 
     await h.adminSay("Добрый день, чем помочь?", thread);
     const reply = h.calls.findLast((c) => c.method === "copyMessage" && c.payload.chat_id === ANNA)!;
@@ -280,17 +354,14 @@ test("переписка: тема удалена, покупатель забл
     assert.equal(again.rows[0]!.blocked_bot, false);
   }));
 
-test("«Написать по заказу» подписывает номер заказа", () =>
+test("«Написать продавцу» подписывает номер заказа", () =>
   withHarness(async (h) => {
     await h.addProduct({ name: "Дракон", price: "100", photo: false });
     await h.say(ANNA, "/start");
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /В корзину/);
+    await buyToCart(h, ANNA);
     await checkoutPickup(h, ANNA);
     await h.press(ANNA, /Мои заказы/);
-    await h.press(ANNA, /Написать по заказу/);
+    await h.press(ANNA, /Написать продавцу/);
     await h.say(ANNA, "Когда будет?");
     assert.ok(h.texts(GROUP).some((t) => t.includes("Сообщение по заказу №1001")));
     assert.match(h.lastText(ANNA), /Передал/);
@@ -300,10 +371,7 @@ test("чужой заказ недоступен, чужая группа игн
   withHarness(async (h) => {
     await h.addProduct({ name: "Дракон", price: "100", photo: false });
     await h.say(ANNA, "/start");
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /В корзину/);
+    await buyToCart(h, ANNA);
     await checkoutPickup(h, ANNA);
 
     await h.say(BORIS, "/start");
@@ -332,14 +400,34 @@ test("чужой заказ недоступен, чужая группа игн
     assert.equal(h.calls.length, n);
   }));
 
+test("ADMIN_IDS: чужой человек в группе не получает админку и не пишет клиентам", () =>
+  withHarness(async (h) => {
+    h.adminIds = [ADMIN];
+    await h.boot();
+
+    await h.adminSay("/admin", undefined, GROUP, 555);
+    assert.match(h.lastText(GROUP), /Нет доступа/);
+    assert.ok(!h.texts(GROUP).some((t) => t.includes("🟢 Бот работает")));
+
+    await h.adminSay("/admin");
+    await h.press(GROUP, /Режим обслуживания/, 555);
+    assert.equal(h.app.settings.isMaintenance(), false);
+    assert.match(h.alerts().at(-1)!, /Нет доступа/);
+
+    await h.say(ANNA, "привет");
+    const thread = await h.topicOf(ANNA);
+    const n = h.calls.filter((c) => c.method === "copyMessage").length;
+    await h.adminSay("я не админ", thread, GROUP, 555);
+    assert.equal(h.calls.filter((c) => c.method === "copyMessage").length, n, "чужое сообщение не ушло покупателю");
+    await h.adminSay("я админ", thread);
+    assert.equal(h.calls.filter((c) => c.method === "copyMessage").length, n + 1);
+  }));
+
 test("устаревшая кнопка у админа даёт подсказку, а не меняет заказ", () =>
   withHarness(async (h) => {
     await h.addProduct({ name: "Дракон", price: "100", photo: false });
     await h.say(ANNA, "/start");
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /В корзину/);
+    await buyToCart(h, ANNA);
     await checkoutPickup(h, ANNA);
     await h.press(GROUP, /Оплата подтверждена/, ADMIN);
     // Второй админ жмёт ту же кнопку на старой карточке
@@ -353,35 +441,73 @@ test("устаревшая кнопка у админа даёт подсказ�
     assert.match(h.alerts().at(-1)!, /неактуально/);
   }));
 
-test("поиск: находит, не падает на спецсимволах, предлагает свою модель", () =>
+test("поиск: находит, листает результаты, не падает на спецсимволах, предлагает свою модель", () =>
   withHarness(async (h) => {
     await h.addProduct({ name: "Дракон 100%", price: "100", photo: false });
     await h.addProduct({ name: "Кот", price: "200", photo: false });
     await h.say(ANNA, "/start");
     await h.press(ANNA, /Поиск/);
     await h.say(ANNA, "драк");
-    assert.ok(h.buttons(ANNA).some((b) => b.includes("Дракон 100%")));
-    assert.ok(!h.buttons(ANNA).some((b) => b.includes("Кот")));
-
-    // Назад с карточки ведёт в результаты поиска
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /Назад/);
-    assert.match(h.lastText(ANNA), /нашлось по запросу «драк»/);
+    assert.match(h.lastText(ANNA), /Дракон 100%/);
+    assert.ok(!h.lastText(ANNA).includes("Кот"));
+    await h.press(ANNA, /⏩/);
+    assert.match(h.alerts().at(-1)!, /только эта моделька/);
 
     await h.press(ANNA, /Назад/);
     await h.say(ANNA, "%");
-    assert.ok(h.buttons(ANNA).some((b) => b.includes("Дракон 100%")));
-    assert.ok(!h.buttons(ANNA).some((b) => b.includes("Кот")), "% ищется буквально");
+    assert.match(h.lastText(ANNA), /Дракон 100%/, "% ищется буквально");
 
-    await h.press(ANNA, /Поиск|Назад/);
+    await h.press(ANNA, /Назад/);
     await h.say(ANNA, "<script>&");
     assert.match(h.lastText(ANNA), /&lt;script&gt;&amp;/);
-    assert.ok(h.buttons(ANNA).some((b) => b.includes("Заказать свою модель")));
+    assert.ok(h.buttons(ANNA).some((b) => b.includes("Своя модель")));
   }));
 
-test("навигация: в каждом подменю есть «Назад» и «Главное меню», длинный каталог листается", () =>
+test("хиты и новинки: попадают только модельки с метками", () =>
   withHarness(async (h) => {
-    for (let i = 1; i <= 8; i++) await h.addProduct({ name: `Игрушка ${i}`, price: "100", photo: false });
+    await h.addProduct({ name: "Дракон", price: "100", badges: "hit", photo: false });
+    await h.addProduct({ name: "Кот", price: "200", photo: false });
+    await h.say(ANNA, "/start");
+    await h.press(ANNA, /Хиты и новинки/);
+    assert.match(h.lastText(ANNA), /Дракон/);
+    assert.match(h.lastText(ANNA), /🔥 Хит/);
+    await h.press(ANNA, /⏩/);
+    assert.match(h.alerts().at(-1)!, /только эта моделька/);
+  }));
+
+test("фото-галерея: ⬅️➡️ листают фото по кругу, ⏪⏩ — модельки", () =>
+  withHarness(async (h) => {
+    await h.addProduct({ name: "Дракон", price: "1500", photos: ["p1", "p2", "p3"] });
+    await h.addProduct({ name: "Кот", price: "900", photo: false });
+    await h.say(ANNA, "/start");
+    await h.press(ANNA, /Каталог/);
+    await h.press(ANNA, /Животные/);
+    // Новейшая моделька — Кот, листаем к Дракону
+    assert.match(h.lastText(ANNA), /Кот/);
+    await h.press(ANNA, /⏩/);
+    assert.match(h.lastText(ANNA), /Дракон/);
+    // Кот без фото — текстовая карточка, поэтому Дракон приходит новым sendPhoto, а не editMessageMedia.
+    const dragon = h.calls.findLast((c) => c.method === "sendPhoto" || c.method === "editMessageMedia")!;
+    assert.equal(dragon.payload.photo ?? dragon.payload.media?.media, "p1");
+
+    await h.press(ANNA, /➡️/);
+    assert.equal(h.calls.findLast((c) => c.method === "editMessageMedia")!.payload.media.media, "p2");
+    await h.press(ANNA, /➡️/);
+    assert.equal(h.calls.findLast((c) => c.method === "editMessageMedia")!.payload.media.media, "p3");
+    await h.press(ANNA, /➡️/);
+    assert.equal(h.calls.findLast((c) => c.method === "editMessageMedia")!.payload.media.media, "p1", "по кругу вперёд");
+    await h.press(ANNA, /⬅️/);
+    assert.equal(h.calls.findLast((c) => c.method === "editMessageMedia")!.payload.media.media, "p3", "по кругу назад");
+
+    await h.press(ANNA, /В корзину/);
+    assert.ok(h.alerts().includes("Добавлено ✅"));
+    // После добавления фото не мерцает: меняется только подпись
+    assert.equal(h.calls.at(-2)!.method, "editMessageCaption");
+  }));
+
+test("навигация: в каждом подменю есть «Назад» и «Главное меню»", () =>
+  withHarness(async (h) => {
+    await h.addProduct({ name: "Дракон", price: "100", photo: false });
     await h.say(ANNA, "/start");
     const check = (where: string) => {
       const b = h.buttons(ANNA);
@@ -391,74 +517,122 @@ test("навигация: в каждом подменю есть «Назад»
     await h.press(ANNA, /Каталог/);
     check("категории");
     await h.press(ANNA, /Животные/);
-    check("товары");
-    assert.equal(h.buttons(ANNA).filter((b) => b.startsWith("Игрушка")).length, 6);
-    await h.press(ANNA, /▶️/);
-    check("товары, страница 2");
-    assert.equal(h.buttons(ANNA).filter((b) => b.startsWith("Игрушка")).length, 2);
-    await h.press(ANNA, /Игрушка/);
     check("карточка");
     await h.press(ANNA, /В корзину/);
     await h.press(ANNA, /Корзина/);
     check("корзина");
     await h.press(ANNA, /Назад/);
-    await h.press(ANNA, /Доставка и оплата/);
-    check("доставка");
+    await h.press(ANNA, /О нас и доставка/);
+    check("о нас");
     await h.press(ANNA, /Главное меню/);
     await h.press(ANNA, /Мои заказы/);
     check("заказы, пусто");
   }));
 
-test("фото товара: карточка с фото, смена размера не перезагружает картинку", () =>
+test("админка: правка, метки и скрытие модельки, скрытую нельзя купить", () =>
   withHarness(async (h) => {
-    await h.addProduct({ name: "Дракон", price: "1500", sizes: "10 см, 15 см", colors: "белый, зелёный" });
+    await h.addProduct({ name: "Дракон", price: "100", photo: false });
     await h.say(ANNA, "/start");
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    assert.equal(h.calls.findLast((c) => c.method === "sendPhoto")!.payload.photo, "photo-Дракон");
-    await h.press(ANNA, /В корзину/);
-    assert.ok(h.alerts().includes("Сначала выбери размер"));
-    await h.press(ANNA, /^10 см$/);
-    assert.equal(h.calls.at(-2)!.method, "editMessageCaption");
-    await h.press(ANNA, /В корзину/);
-    assert.ok(h.alerts().includes("Сначала выбери цвет"));
-    await h.press(ANNA, /^белый$/);
-    await h.press(ANNA, /В корзину/);
-    assert.ok(h.alerts().includes("✅ Добавлено в корзину"));
-    assert.ok(h.buttons(ANNA).includes("✅ 10 см"));
-  }));
-
-test("админка: правка и скрытие товара, скрытый товар нельзя купить", () =>
-  withHarness(async (h) => {
-    await h.addProduct({ name: "Дракон", price: "100", sizes: "15 см", photo: false });
-    await h.say(ANNA, "/start");
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /В корзину/);
+    await buyToCart(h, ANNA);
 
     await h.adminSay("/admin");
-    await h.press(GROUP, /Товары/, ADMIN);
+    await h.press(GROUP, /Модельки/, ADMIN);
     await h.press(GROUP, /Дракон/, ADMIN);
-    await h.press(GROUP, /^Цена$/, ADMIN);
+    await h.press(GROUP, /^💰 Цена$/, ADMIN);
     await h.adminSay("сто");
     assert.match(h.lastText(GROUP), /числом/);
     await h.adminSay("250,50");
-    await h.press(GROUP, /Открыть товар/, ADMIN);
+    await h.press(GROUP, /Открыть модельку/, ADMIN);
     assert.match(h.lastText(GROUP), /250,50 ₽/);
+    await h.press(GROUP, /▫️ 🔥 Хит/, ADMIN);
+    assert.match(h.lastText(GROUP), /Метки: 🔥 Хит/);
+    await h.press(GROUP, /Сделать «под заказ»/, ADMIN);
+    assert.match(h.lastText(GROUP), /🖨 Под заказ/);
     await h.press(GROUP, /Скрыть/, ADMIN);
 
-    await h.press(ANNA, /Корзина|Главное меню/);
     await h.say(ANNA, "/start");
     assert.ok(h.buttons(ANNA).includes("🛒 Корзина"), "скрытый товар не считается");
     await h.press(ANNA, /Корзина/);
     assert.match(h.lastText(ANNA), /пуста/);
     const n = h.alerts().length;
-    await h.pressRaw(ANNA, "p:1:-1:-1");
+    await h.pressRaw(ANNA, "p:1");
     assert.equal(h.alerts().length, n + 1);
-    await h.pressRaw(ANNA, "add:1:0:-1");
+    await h.pressRaw(ANNA, "add:1");
     assert.match(h.alerts().at(-1)!, /нет в продаже/);
+  }));
+
+test("админка: мульти-фото и удаление модельки без заказов", () =>
+  withHarness(async (h) => {
+    await h.addProduct({ name: "Дракон", price: "100", photos: ["p1", "p2"] });
+    await h.adminSay("/admin");
+    await h.press(GROUP, /Модельки/, ADMIN);
+    await h.press(GROUP, /Дракон/, ADMIN);
+    await h.press(GROUP, /➕ Фото/, ADMIN);
+    await h.adminSay({ photo: [{ file_id: "p3", file_unique_id: "p3", width: 1, height: 1 }] });
+    await h.press(GROUP, /Готово/, ADMIN);
+    assert.match(h.lastText(GROUP), /Фото: 3/);
+
+    await h.press(GROUP, /🗑 Фото/, ADMIN);
+    await h.press(GROUP, /🗑 Фото 2/, ADMIN);
+    assert.match(h.lastText(GROUP), /Фото: 2/);
+    const { rows } = await h.db.query(`SELECT photos FROM products WHERE id = 1`);
+    assert.deepEqual(rows[0]!.photos, ["p1", "p3"]);
+
+    await h.press(GROUP, /🗑 Удалить/, ADMIN);
+    await h.press(GROUP, /Да, удалить/, ADMIN);
+    const gone = await h.db.query(`SELECT 1 FROM products WHERE id = 1`);
+    assert.equal(gone.rows.length, 0);
+  }));
+
+test("категории: обложка и порядок", () =>
+  withHarness(async (h) => {
+    await h.addProduct({ name: "Дракон", price: "100", photo: false });
+    await h.adminSay("/admin");
+    await h.press(GROUP, /Категории/, ADMIN);
+    await h.press(GROUP, /Добавить категорию/, ADMIN);
+    await h.adminSay("Фигурки");
+    await h.press(GROUP, /Категории/, ADMIN);
+    await h.press(GROUP, /Фигурки/, ADMIN);
+    await h.press(GROUP, /Обложка/, ADMIN);
+    await h.adminSay({ photo: [{ file_id: "cover1", file_unique_id: "c", width: 1, height: 1 }] });
+    const { rows } = await h.db.query(`SELECT photo_file_id FROM categories WHERE name = 'Фигурки'`);
+    assert.equal(rows[0]!.photo_file_id, "cover1");
+
+    await h.press(GROUP, /Категории/, ADMIN);
+    await h.press(GROUP, /Фигурки/, ADMIN);
+    await h.press(GROUP, /Выше/, ADMIN);
+    const ordered = await h.db.query(`SELECT name FROM categories ORDER BY position, id`);
+    assert.deepEqual(ordered.rows.map((r) => r.name), ["Фигурки", "Животные"]);
+  }));
+
+test("бан: покупатель теряет доступ, рассылка его не считает, разбан возвращает", () =>
+  withHarness(async (h) => {
+    await h.say(ANNA, "привет");
+    await h.topicOf(ANNA);
+    await h.press(GROUP, /Забанить/, ADMIN);
+    await h.say(ANNA, "/start");
+    assert.match(h.lastText(ANNA), /Доступ к боту ограничен/);
+    assert.equal(await h.app.users.countActive(), 0);
+
+    await h.press(GROUP, /Разбанить/, ADMIN);
+    await h.say(ANNA, "/start");
+    assert.match(h.lastText(ANNA), /Привет/);
+  }));
+
+test("статистика: выручка за день/неделю/месяц и топ моделек", () =>
+  withHarness(async (h) => {
+    await h.addProduct({ name: "Дракон", price: "100", photo: false });
+    await h.say(ANNA, "/start");
+    await buyToCart(h, ANNA);
+    await checkoutPickup(h, ANNA);
+    await h.press(GROUP, /Оплата подтверждена/, ADMIN);
+    await h.adminSay("/admin");
+    await h.press(GROUP, /Статистика/, ADMIN);
+    const text = h.lastText(GROUP);
+    assert.match(text, /За день: 100 ₽/);
+    assert.match(text, /За неделю: 100 ₽/);
+    assert.match(text, /За месяц: 100 ₽/);
+    assert.match(text, /Дракон — 1 шт/);
   }));
 
 test("обслуживание закрывает бота для покупателей, но не для админов", () =>
@@ -519,17 +693,16 @@ test("перезапуск сервера не теряет оформление
     assert.match(h.lastText(ANNA), /Здорово, друг!/);
     await h.press(ANNA, /Каталог/);
     await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
     await h.press(ANNA, /В корзину/);
     await h.press(ANNA, /Корзина/);
     await h.press(ANNA, /Оформить/);
-    await h.press(ANNA, /Самовывоз/);
+    await h.say(ANNA, "Анна Иванова");
 
     await h.boot();
 
-    await h.say(ANNA, "Анна Иванова");
-    assert.match(h.lastText(ANNA), /Шаг 3 из 3|Поделись контактом/);
     await h.say(ANNA, "89001234567");
+    await h.press(ANNA, /Самовывоз/);
+    await h.press(ANNA, /Пропустить/);
     await h.press(ANNA, /Подтвердить/);
     assert.ok(h.texts(ANNA).some((t) => t.includes("Счёт по заказу №1001")));
     await h.say(ANNA, "/start");
@@ -552,13 +725,9 @@ test("отмена на шаге телефона убирает клавиат�
   withHarness(async (h) => {
     await h.addProduct({ name: "Дракон", price: "100", photo: false });
     await h.say(ANNA, "/start");
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /В корзину/);
+    await buyToCart(h, ANNA);
     await h.press(ANNA, /Корзина/);
     await h.press(ANNA, /Оформить/);
-    await h.press(ANNA, /Самовывоз/);
     await h.say(ANNA, "Анна Иванова");
     await h.say(ANNA, "❌ Отмена");
     assert.ok(h.calls.some((c) => c.payload.chat_id === ANNA && c.payload.reply_markup?.remove_keyboard));
@@ -570,10 +739,7 @@ test("покупатель отменяет неоплаченный заказ,
   withHarness(async (h) => {
     await h.addProduct({ name: "Дракон", price: "100", photo: false });
     await h.say(ANNA, "/start");
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /В корзину/);
+    await buyToCart(h, ANNA);
     await checkoutPickup(h, ANNA);
     await h.pressRaw(ANNA, "ox:1001");
     await h.press(ANNA, /Да, отменить/);
@@ -582,10 +748,7 @@ test("покупатель отменяет неоплаченный заказ,
     assert.ok(h.texts(GROUP).some((t) => t.includes("Отменён покупателем")));
 
     await h.press(ANNA, /Главное меню/);
-    await h.press(ANNA, /Каталог/);
-    await h.press(ANNA, /Животные/);
-    await h.press(ANNA, /Дракон/);
-    await h.press(ANNA, /В корзину/);
+    await buyToCart(h, ANNA);
     await checkoutPickup(h, ANNA);
     await h.press(GROUP, /Оплата подтверждена/, ADMIN);
     await h.pressRaw(ANNA, "oxy:1002");

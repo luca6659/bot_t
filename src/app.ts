@@ -13,7 +13,7 @@ async function main(): Promise<void> {
   const db = config.databaseUrl ? createPgDb(config.databaseUrl) : await createLocalDb(".data/pg");
   await runMigrations(db);
 
-  const { bot, broadcast } = await createBot({ token: config.botToken, adminGroupId: config.adminGroupId, db });
+  const { bot, broadcast } = await createBot({ token: config.botToken, adminGroupId: config.adminGroupId, adminIds: config.adminIds, db });
   await bot.api.setMyCommands([
     { command: "start", description: "Главное меню" },
     { command: "cancel", description: "Отменить текущее действие" },

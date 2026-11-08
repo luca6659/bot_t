@@ -34,7 +34,3 @@ export function parseList(input: string): string[] {
   if (trimmed === "-" || trimmed === "—") return [];
   return [...new Set(trimmed.split(/[,\n;]/).map((s) => s.trim()).filter(Boolean))];
 }
-
-export function variantLabel(size: string, color: string): string {
-  return [size, color].filter(Boolean).join(", ");
-}

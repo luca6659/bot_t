@@ -4,19 +4,23 @@ import type { Context, SessionFlavor } from "grammy";
 export type DeliveryMethod = "courier" | "pickup";
 
 export interface ProductDraft {
-  categoryId: number;
+  categoryId?: number;
   name?: string;
-  photo?: string | null;
   description?: string;
+  photos: string[];
+  photosDone?: boolean;
   price?: number;
-  sizes?: string[];
+  stock?: "in_stock" | "on_order";
+  isHit?: boolean;
+  isNew?: boolean;
 }
 
-export type ProductField = "name" | "photo" | "description" | "price" | "sizes" | "colors";
+export type ProductField = "name" | "description" | "price" | "photos_add";
 
 export type AdminAction =
   | { type: "quote_price"; orderId: number }
   | { type: "quote_deadline"; orderId: number; price: number }
+  | { type: "quote_photo"; orderId: number; price: number; deadline: string }
   | { type: "delivery_cost"; orderId: number }
   | { type: "tracking"; orderId: number }
   | { type: "cancel_reason"; orderId: number }
@@ -24,12 +28,14 @@ export type AdminAction =
   | { type: "product_edit"; id: number; field: ProductField }
   | { type: "category_new" }
   | { type: "category_rename"; id: number }
+  | { type: "category_photo"; id: number }
   | { type: "text_edit"; key: string }
+  | { type: "banner_edit" }
   | { type: "courier_cost" }
   | { type: "broadcast" }
   | { type: "broadcast_confirm"; messageId: number };
 
-export type CheckoutStep = "delivery" | "name" | "phone" | "address" | "confirm";
+export type CheckoutStep = "name" | "phone" | "delivery" | "address" | "comment" | "confirm";
 
 export type Flow =
   | { kind: "search" }
@@ -41,31 +47,31 @@ export type Flow =
       name?: string;
       phone?: string;
       address?: string;
+      comment?: string;
     }
   | {
       kind: "custom";
-      step: "description" | "size" | "color" | "confirm";
+      step: "description" | "wishes" | "confirm";
       description: string;
       photos: string[];
-      size?: string;
-      color?: string;
+      wishes?: string;
     }
   | { kind: "receipt"; orderId: number }
   | { kind: "ask"; orderId: number | null }
   | { kind: "admin"; threadId: number | null; action: AdminAction };
 
-export type ListRef = { type: "category"; id: number; page: number } | { type: "search"; page: number };
+// В каком списке листаем карточки моделек: категория, поиск или хиты.
+export type ListRef = { type: "category"; id: number } | { type: "search"; query: string } | { type: "hits" };
 
 export interface SessionData {
   flow: Flow | null;
   list: ListRef | null;
-  query: string | null;
   lastAckAt: number;
   lastMediaGroup: string | null;
 }
 
 export function initialSession(): SessionData {
-  return { flow: null, list: null, query: null, lastAckAt: 0, lastMediaGroup: null };
+  return { flow: null, list: null, lastAckAt: 0, lastMediaGroup: null };
 }
 
 export type MyContext = Context & SessionFlavor<SessionData>;

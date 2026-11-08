@@ -1,12 +1,14 @@
-// Панель /admin: товары, категории, заказы, тексты, рассылка, статистика, обслуживание.
+// Панель /admin: модельки, категории, заказы, тексты, рассылка, статистика, обслуживание.
 import { Composer, InlineKeyboard } from "grammy";
 import type { AdminAction, MyContext, ProductField } from "../../bot/context.js";
+import { fileTooBig } from "../../bot/guards.js";
 import { EDITABLE_TEXTS, t, type EditableTextKey } from "../../i18n/texts.js";
 import { logAction } from "../../infrastructure/logger.js";
-import { esc, formatRub, parseList, parseRub } from "../../views/format.js";
+import { esc, formatRub, parseRub } from "../../views/format.js";
 import { action, cancelKb, navRow, pagerRow, show, threadOf } from "../../views/screen.js";
 import type { BroadcastService } from "../broadcast/broadcast.service.js";
-import { PAGE_SIZE, type CatalogRepository } from "../catalog/catalog.repository.js";
+import { PAGE_SIZE, type CatalogRepository, type Product } from "../catalog/catalog.repository.js";
+import type { OrderNotifier } from "../orders/orders.service.js";
 import { ORDERS_PAGE_SIZE } from "../orders/orders.repository.js";
 import type { OrdersService } from "../orders/orders.service.js";
 import { STATUS_LABELS, orderTotal, type OrderStatus } from "../orders/orders.types.js";
@@ -15,7 +17,8 @@ import type { UsersRepository } from "../users/users.repository.js";
 import { createOrderActions, showCard } from "./order-actions.handler.js";
 
 const HOME = "a:home";
-const MAX_DESCRIPTION = 700; // Подпись к фото ограничена 1024 символами, нужен запас под цену и варианты.
+const MAX_DESCRIPTION = 700; // Подпись к фото ограничена 1024 символами, нужен запас под цену и наличие.
+const MAX_PHOTOS = 10;
 
 function adminNav(kb: InlineKeyboard, back: string): InlineKeyboard {
   return navRow(kb, back, HOME, "🏠 Админка");
@@ -23,12 +26,14 @@ function adminNav(kb: InlineKeyboard, back: string): InlineKeyboard {
 
 const FIELD_PROMPTS: Record<ProductField, string> = {
   name: "Новое название:",
-  photo: "Пришли новое фото:",
   description: "Новое описание:",
   price: "Новая цена в рублях:",
-  sizes: "Размеры через запятую, например «10 см, 15 см». Если размера нет, напиши «-»:",
-  colors: "Цвета через запятую, например «белый, зелёный». Если цвета нет, напиши «-»:",
+  photos_add: "Пришли фото — по одному или альбомом. Когда закончишь, нажми «Готово».",
 };
+
+function stockLabel(p: Product): string {
+  return p.stock === "in_stock" ? "✅ В наличии" : "🖨 Под заказ";
+}
 
 export function createAdminComposer(
   catalog: CatalogRepository,
@@ -36,6 +41,7 @@ export function createAdminComposer(
   settings: SettingsService,
   users: UsersRepository,
   broadcast: BroadcastService,
+  notifier: OrderNotifier,
 ): Composer<MyContext> {
   const composer = new Composer<MyContext>();
   const orderActions = createOrderActions(orders);
@@ -54,7 +60,7 @@ export function createAdminComposer(
 
   function homeScreen() {
     const kb = new InlineKeyboard()
-      .text("🧸 Товары", "a:ps:0").text("🗂 Категории", "a:cs").row()
+      .text("🧸 Модельки", "a:ps:0").text("🗂 Категории", "a:cs").row()
       .text("🧾 Заказы", "a:os").text("✏️ Тексты", "a:ts").row()
       .text("📣 Рассылка", "a:b").text("📊 Статистика", "a:st").row()
       .text(settings.isMaintenance() ? "🟢 Включить бота" : "🛠 Режим обслуживания", "a:mt");
@@ -85,32 +91,46 @@ export function createAdminComposer(
     await show(ctx, homeScreen());
   });
 
-  // --- Товары ---
+  // Бан из закреп-карточки клиента в его теме.
+  action(composer, /^ab:(\d+)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const user = await users.get(id);
+    if (!user) return;
+    await users.setBanned(id, !user.banned);
+    logAction("admin.ban", ctx, { userId: id, banned: !user.banned });
+    await ctx.answerCallbackQuery({ text: !user.banned ? "Пользователь забанен" : "Пользователь разбанен" });
+    await notifier.clientCard(id);
+  });
+
+  // --- Модельки ---
 
   async function showProducts(ctx: MyContext, page: number): Promise<void> {
     const result = await catalog.all(page);
-    const kb = new InlineKeyboard().text("➕ Добавить товар", "a:pn").row();
+    const kb = new InlineKeyboard().text("➕ Добавить модельку", "a:pn").row();
     for (const p of result.items) kb.text(`${p.active ? "" : "🙈 "}${p.name} · ${formatRub(p.price)}`, `a:p:${p.id}`).row();
     pagerRow(kb, page, Math.ceil(result.total / PAGE_SIZE), (n) => `a:ps:${n}`);
-    await show(ctx, { text: `🧸 <b>Товары</b> (${result.total})`, kb: adminNav(kb, HOME) });
+    await show(ctx, { text: `🧸 <b>Модельки</b> (${result.total})`, kb: adminNav(kb, HOME) });
   }
 
   async function showProduct(ctx: MyContext, id: number): Promise<void> {
     const p = await catalog.product(id);
     if (!p) return showProducts(ctx, 0);
+    const badges = [p.isHit ? "🔥 Хит" : "", p.isNew ? "🆕 Новинка" : ""].filter(Boolean).join(" · ") || "нет";
     const text = [
-      `<b>${esc(p.name)}</b>${p.active ? "" : " 🙈 скрыт"}`,
-      `💰 ${formatRub(p.price)}`,
+      `<b>${esc(p.name)}</b>${p.active ? "" : " 🙈 скрыта"}`,
+      `💰 ${formatRub(p.price)} · ${stockLabel(p)}`,
+      `🏷 Метки: ${badges}`,
+      `🖼 Фото: ${p.photos.length}`,
       p.description ? esc(p.description) : "Описания нет",
-      `📏 Размеры: ${esc(p.sizes.join(", ") || "нет")}`,
-      `🎨 Цвета: ${esc(p.colors.join(", ") || "нет")}`,
     ].join("\n");
     const kb = new InlineKeyboard()
-      .text("Название", `a:pe:${id}:name`).text("Фото", `a:pe:${id}:photo`).row()
-      .text("Описание", `a:pe:${id}:description`).text("Цена", `a:pe:${id}:price`).row()
-      .text("Размеры", `a:pe:${id}:sizes`).text("Цвета", `a:pe:${id}:colors`).row()
-      .text(p.active ? "🙈 Скрыть" : "👁 Показать", `a:pt:${id}`);
-    await show(ctx, { text, kb: adminNav(kb, "a:ps:0"), photo: p.photo });
+      .text("✏️ Название", `a:pe:${id}:name`).text("💰 Цена", `a:pe:${id}:price`).row()
+      .text("📝 Описание", `a:pe:${id}:description`).row()
+      .text("➕ Фото", `a:pe:${id}:photos_add`).text("🗑 Фото", `a:pdl:${id}`).row()
+      .text(p.stock === "in_stock" ? "🖨 Сделать «под заказ»" : "✅ Сделать «в наличии»", `a:pstk:${id}`).row()
+      .text(`${p.isHit ? "✅" : "▫️"} 🔥 Хит`, `a:pb:${id}:hit`).text(`${p.isNew ? "✅" : "▫️"} 🆕 Новинка`, `a:pb:${id}:new`).row()
+      .text(p.active ? "🙈 Скрыть" : "👁 Показать", `a:pt:${id}`).text("🗑 Удалить", `a:px:${id}`).row();
+    await show(ctx, { text, kb: adminNav(kb, "a:ps:0"), photo: p.photos[0] ?? null });
   }
 
   action(composer, /^a:ps:(\d+)$/, (ctx) => showProducts(ctx, Number(ctx.match[1])));
@@ -121,12 +141,75 @@ export function createAdminComposer(
     await showProduct(ctx, Number(ctx.match[1]));
   });
 
+  action(composer, /^a:pstk:(\d+)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const p = await catalog.product(id);
+    if (p) await catalog.updateProduct(id, { stock: p.stock === "in_stock" ? "on_order" : "in_stock" });
+    await showProduct(ctx, id);
+  });
+
+  action(composer, /^a:pb:(\d+):(hit|new)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const p = await catalog.product(id);
+    if (p) await catalog.updateProduct(id, ctx.match[2] === "hit" ? { isHit: !p.isHit } : { isNew: !p.isNew });
+    await showProduct(ctx, id);
+  });
+
+  // Удаление одного фото по номеру.
+  action(composer, /^a:pdl:(\d+)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const p = await catalog.product(id);
+    if (!p) return;
+    const kb = new InlineKeyboard();
+    p.photos.forEach((_, i) => kb.text(`🗑 Фото ${i + 1}`, `a:pd:${id}:${i}`).row());
+    await show(ctx, { text: `🖼 Какое фото удалить у «${esc(p.name)}»?`, kb: adminNav(kb, `a:p:${id}`) });
+  });
+
+  action(composer, /^a:pd:(\d+):(\d+)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const idx = Number(ctx.match[2]);
+    const p = await catalog.product(id);
+    if (p) {
+      const photos = p.photos.filter((_, i) => i !== idx);
+      await catalog.updateProduct(id, { photos });
+    }
+    await showProduct(ctx, id);
+  });
+
+  action(composer, /^a:px:(\d+)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const kb = new InlineKeyboard().text("Да, удалить", `a:pxy:${id}`).text("Нет, оставить", `a:p:${id}`);
+    await show(ctx, { text: `🗑 Точно удалить модельку? Если она есть в заказах, удалить не получится — только скрыть.`, kb });
+  });
+
+  action(composer, /^a:pxy:(\d+)$/, async (ctx) => {
+    const id = Number(ctx.match[1]);
+    const ok = await catalog.deleteProduct(id);
+    if (!ok) {
+      await ctx.answerCallbackQuery({ text: "Моделька есть в заказах. Лучше скрой её.", show_alert: true });
+      return showProduct(ctx, id);
+    }
+    logAction("admin.product_deleted", ctx, { productId: id });
+    await showProducts(ctx, 0);
+  });
+
   action(composer, /^a:pe:(\d+):(\w+)$/, async (ctx) => {
     const field = ctx.match[2] as ProductField;
     await startInput(ctx, { type: "product_edit", id: Number(ctx.match[1]), field }, FIELD_PROMPTS[field]);
   });
 
+  // Создание модельки: название → описание → фото → категория → цена → наличие → метки.
   action(composer, "a:pn", async (ctx) => {
+    ctx.session.flow = { kind: "admin", threadId: threadOf(ctx) ?? null, action: { type: "product_new", draft: { photos: [] } } };
+    await show(ctx, { text: "Шаг 1 из 7. Название модельки:", kb: cancelKb("a:x") });
+  });
+
+  action(composer, "a:png", async (ctx) => {
+    const flow = ctx.session.flow;
+    if (flow?.kind !== "admin" || flow.action.type !== "product_new") return;
+    const d = flow.action.draft;
+    if (d.name === undefined || d.description === undefined) return;
+    d.photosDone = true;
     const categories = await catalog.categories(false);
     if (categories.length === 0) {
       const kb = new InlineKeyboard().text("➕ Создать категорию", "a:cn");
@@ -134,73 +217,91 @@ export function createAdminComposer(
     }
     const kb = new InlineKeyboard();
     for (const c of categories) kb.text(c.name, `a:pnc:${c.id}`).row();
-    await show(ctx, { text: "Шаг 1 из 7. В какую категорию добавить товар?", kb: adminNav(kb, "a:ps:0") });
+    await show(ctx, { text: "Шаг 4 из 7. В какую категорию добавить модельку?", kb: adminNav(kb, "a:ps:0") });
   });
 
   action(composer, /^a:pnc:(\d+)$/, async (ctx) => {
-    await startInput(ctx, { type: "product_new", draft: { categoryId: Number(ctx.match[1]) } }, "Шаг 2 из 7. Название товара:");
-  });
-
-  action(composer, "a:pnp", async (ctx) => {
     const flow = ctx.session.flow;
     if (flow?.kind !== "admin" || flow.action.type !== "product_new") return;
-    flow.action.draft.photo = null;
-    await show(ctx, { text: "Шаг 4 из 7. Описание товара:", kb: cancelKb("a:x") });
+    flow.action.draft.categoryId = Number(ctx.match[1]);
+    await show(ctx, { text: "Шаг 5 из 7. Цена в рублях:", kb: cancelKb("a:x") });
   });
 
-  // Создание товара: один шаг на сообщение, шаг определяется заполненными полями черновика.
+  action(composer, /^a:pns:(in_stock|on_order)$/, async (ctx) => {
+    const flow = ctx.session.flow;
+    if (flow?.kind !== "admin" || flow.action.type !== "product_new") return;
+    flow.action.draft.stock = ctx.match[1] as "in_stock" | "on_order";
+    const kb = new InlineKeyboard()
+      .text("🔥 Хит", "a:pnh:hit").text("🆕 Новинка", "a:pnh:new").row()
+      .text("🔥 + 🆕", "a:pnh:both").text("Без меток", "a:pnh:none").row();
+    await show(ctx, { text: "Шаг 7 из 7. Метки для витрины:", kb });
+  });
+
+  action(composer, /^a:pnh:(hit|new|both|none)$/, async (ctx) => {
+    const flow = ctx.session.flow;
+    if (flow?.kind !== "admin" || flow.action.type !== "product_new") return;
+    const d = flow.action.draft;
+    if (d.categoryId === undefined || d.price === undefined || d.stock === undefined) return;
+    const mark = ctx.match[1];
+    const id = await catalog.createProduct({
+      categoryId: d.categoryId,
+      name: d.name!,
+      description: d.description!,
+      price: d.price,
+      photos: d.photos,
+      stock: d.stock,
+      isHit: mark === "hit" || mark === "both",
+      isNew: mark === "new" || mark === "both",
+    });
+    ctx.session.flow = null;
+    logAction("admin.product_created", ctx, { productId: id });
+    await say(ctx, `✅ Моделька «${esc(d.name!)}» добавлена.`, new InlineKeyboard().text("Открыть модельку", `a:p:${id}`).row().text("➕ Ещё моделька", "a:pn").row().text("🏠 Админка", HOME));
+  });
+
+  action(composer, "a:ped", async (ctx) => {
+    const flow = ctx.session.flow;
+    if (flow?.kind !== "admin" || flow.action.type !== "product_edit") return;
+    const id = flow.action.id;
+    ctx.session.flow = null;
+    await showProduct(ctx, id);
+  });
+
   async function handleProductNew(ctx: MyContext, a: Extract<AdminAction, { type: "product_new" }>, text?: string, photo?: string) {
     const d = a.draft;
     const ask = (prompt: string, kb = cancelKb("a:x")) => say(ctx, prompt, kb);
 
     if (d.name === undefined) {
-      if (!text) return ask("Шаг 2 из 7. Напиши название текстом:");
+      if (!text) return ask("Шаг 1 из 7. Напиши название текстом:");
       d.name = text.slice(0, 100);
-      return ask("Шаг 3 из 7. Пришли фото товара:", new InlineKeyboard().text("Без фото", "a:pnp").row().text("❌ Отмена", "a:x"));
-    }
-    if (d.photo === undefined) {
-      if (!photo) return ask("Шаг 3 из 7. Нужно именно фото:", new InlineKeyboard().text("Без фото", "a:pnp").row().text("❌ Отмена", "a:x"));
-      d.photo = photo;
-      return ask("Шаг 4 из 7. Описание товара:");
+      return ask("Шаг 2 из 7. Описание модельки:");
     }
     if (d.description === undefined) {
-      if (!text) return ask("Шаг 4 из 7. Напиши описание текстом:");
+      if (!text) return ask("Шаг 2 из 7. Напиши описание текстом:");
       d.description = text.slice(0, MAX_DESCRIPTION);
-      return ask("Шаг 5 из 7. Цена в рублях:");
+      return ask(`Шаг 3 из 7. Пришли до ${MAX_PHOTOS} фото — по одному или альбомом. Когда закончишь, нажми «Готово»:`, new InlineKeyboard().text(t("btn.done"), "a:png").row().text("❌ Отмена", "a:x"));
     }
+    if (!d.photosDone) {
+      if (fileTooBig(ctx.msg!)) return ask(t("error.file_too_big"));
+      if (photo && d.photos.length < MAX_PHOTOS) d.photos.push(photo);
+      const group = ctx.msg!.media_group_id;
+      if (group && group === ctx.session.lastMediaGroup) return;
+      ctx.session.lastMediaGroup = group ?? null;
+      return ask(`🖼 Фото: ${d.photos.length} из ${MAX_PHOTOS}. Ещё или «Готово»:`, new InlineKeyboard().text(t("btn.done"), "a:png").row().text("❌ Отмена", "a:x"));
+    }
+    if (d.categoryId === undefined) return ask("Выбери категорию кнопкой выше.");
     if (d.price === undefined) {
       const price = text ? parseRub(text) : null;
       if (price === null) return ask("Шаг 5 из 7. Напиши цену числом, например 1500:");
       d.price = price;
-      return ask(`Шаг 6 из 7. ${FIELD_PROMPTS.sizes}`);
+      const kb = new InlineKeyboard().text("✅ В наличии", "a:pns:in_stock").text("🖨 Под заказ", "a:pns:on_order");
+      return ask("Шаг 6 из 7. Наличие:", kb);
     }
-    if (d.sizes === undefined) {
-      if (!text) return ask(`Шаг 6 из 7. ${FIELD_PROMPTS.sizes}`);
-      d.sizes = parseList(text);
-      return ask(`Шаг 7 из 7. ${FIELD_PROMPTS.colors}`);
-    }
-    if (!text) return ask(`Шаг 7 из 7. ${FIELD_PROMPTS.colors}`);
-    const id = await catalog.createProduct({
-      categoryId: d.categoryId,
-      name: d.name,
-      description: d.description,
-      price: d.price,
-      photo: d.photo,
-      sizes: d.sizes,
-      colors: parseList(text),
-    });
-    ctx.session.flow = null;
-    logAction("admin.product_created", ctx, { productId: id });
-    return say(ctx, `✅ Товар «${esc(d.name)}» добавлен.`, new InlineKeyboard().text("Открыть товар", `a:p:${id}`).row().text("➕ Ещё товар", "a:pn").row().text("🏠 Админка", HOME));
+    return ask("Выбери наличие и метки кнопками выше.");
   }
 
   async function handleProductEdit(ctx: MyContext, a: Extract<AdminAction, { type: "product_edit" }>, text?: string, photo?: string) {
     const retry = (prompt: string) => say(ctx, prompt, cancelKb("a:x"));
     switch (a.field) {
-      case "photo":
-        if (!photo) return retry(FIELD_PROMPTS.photo);
-        await catalog.updateProduct(a.id, { photo });
-        break;
       case "price": {
         const price = text ? parseRub(text) : null;
         if (price === null) return retry("Напиши цену числом, например 1500:");
@@ -215,15 +316,22 @@ export function createAdminComposer(
         if (!text) return retry(FIELD_PROMPTS.description);
         await catalog.updateProduct(a.id, { description: text.slice(0, MAX_DESCRIPTION) });
         break;
-      case "sizes":
-      case "colors":
-        if (!text) return retry(FIELD_PROMPTS[a.field]);
-        await catalog.updateProduct(a.id, { [a.field]: parseList(text) });
-        break;
+      case "photos_add": {
+        if (fileTooBig(ctx.msg!)) return retry(t("error.file_too_big"));
+        if (!photo) return retry(FIELD_PROMPTS.photos_add);
+        const p = await catalog.product(a.id);
+        if (!p) return;
+        const photos = [...p.photos, photo].slice(0, MAX_PHOTOS);
+        await catalog.updateProduct(a.id, { photos });
+        const group = ctx.msg!.media_group_id;
+        if (group && group === ctx.session.lastMediaGroup) return;
+        ctx.session.lastMediaGroup = group ?? null;
+        return say(ctx, `🖼 Фото: ${photos.length}. Ещё или «Готово»:`, new InlineKeyboard().text(t("btn.done"), "a:ped").row().text("❌ Отмена", "a:x"));
+      }
     }
     ctx.session.flow = null;
     logAction("admin.product_updated", ctx, { productId: a.id, field: a.field });
-    return say(ctx, "✅ Сохранено.", new InlineKeyboard().text("Открыть товар", `a:p:${a.id}`).text("🏠 Админка", HOME));
+    return say(ctx, "✅ Сохранено.", new InlineKeyboard().text("Открыть модельку", `a:p:${a.id}`).text("🏠 Админка", HOME));
   }
 
   // --- Категории ---
@@ -243,14 +351,24 @@ export function createAdminComposer(
     const c = await catalog.category(id);
     if (!c) return showCategories(ctx);
     const kb = new InlineKeyboard()
-      .text("✏️ Переименовать", `a:cr:${id}`).row()
+      .text("✏️ Переименовать", `a:cr:${id}`).text("🖼 Обложка", `a:cp:${id}`).row()
+      .text("⬆️ Выше", `a:cm:${id}:-1`).text("⬇️ Ниже", `a:cm:${id}:1`).row()
       .text(c.active ? "🙈 Скрыть" : "👁 Показать", `a:ct:${id}`);
-    await show(ctx, { text: `<b>${esc(c.name)}</b>${c.active ? "" : " 🙈 скрыта"}`, kb: adminNav(kb, "a:cs") });
+    await show(ctx, { text: `<b>${esc(c.name)}</b>${c.active ? "" : " 🙈 скрыта"}`, kb: adminNav(kb, "a:cs"), photo: c.photo });
   });
 
   action(composer, /^a:cr:(\d+)$/, (ctx) =>
     startInput(ctx, { type: "category_rename", id: Number(ctx.match[1]) }, "Новое название категории:"),
   );
+
+  action(composer, /^a:cp:(\d+)$/, (ctx) =>
+    startInput(ctx, { type: "category_photo", id: Number(ctx.match[1]) }, "Пришли фото-обложку категории:"),
+  );
+
+  action(composer, /^a:cm:(\d+):(-?\d+)$/, async (ctx) => {
+    await catalog.moveCategory(Number(ctx.match[1]), Number(ctx.match[2]));
+    await showCategories(ctx);
+  });
 
   action(composer, /^a:ct:(\d+)$/, async (ctx) => {
     await catalog.toggleCategory(Number(ctx.match[1]));
@@ -297,6 +415,7 @@ export function createAdminComposer(
   function showTexts(ctx: MyContext): Promise<void> {
     const kb = new InlineKeyboard();
     for (const [key, label] of Object.entries(EDITABLE_TEXTS)) kb.text(label, `a:te:${key}`).row();
+    kb.text(`🖼 Баннер меню: ${settings.get("menu_banner") ? "есть" : "нет"}`, "a:tb").row();
     kb.text(`🚚 Курьер: ${courierLabel()}`, "a:cc");
     return show(ctx, { text: "✏️ <b>Тексты и настройки</b>", kb: adminNav(kb, HOME) });
   }
@@ -308,6 +427,10 @@ export function createAdminComposer(
     const current = t(key) || "пока пусто";
     await startInput(ctx, { type: "text_edit", key }, `<b>${EDITABLE_TEXTS[key]}</b>\n\nСейчас:\n${current}\n\nПришли новый текст:`);
   });
+
+  action(composer, "a:tb", (ctx) =>
+    startInput(ctx, { type: "banner_edit" }, "🖼 Пришли фото для баннера главного меню. Он же будет заглушкой там, где нет своих фото:"),
+  );
 
   action(composer, "a:cc", (ctx) =>
     startInput(ctx, { type: "courier_cost" }, `🚚 Сейчас: ${courierLabel()}.\n\nНапиши единую стоимость курьера в рублях. Чтобы считать её вручную для каждого заказа, напиши «-»:`),
@@ -332,8 +455,21 @@ export function createAdminComposer(
 
   action(composer, "a:st", async (ctx) => {
     const [u, o] = await Promise.all([users.stats(), orders.stats()]);
-    const lines = (Object.keys(STATUS_LABELS) as OrderStatus[]).map((s) => `${STATUS_LABELS[s]}: ${o.byStatus[s] ?? 0}`);
-    const text = `📊 <b>Статистика</b>\n\nПокупателей: ${u.total}, новых за 7 дней: ${u.new7d}\nОплачено на сумму: <b>${formatRub(o.revenue)}</b>\n\n${lines.join("\n")}`;
+    const top = o.top.length ? o.top.map((p, i) => `${i + 1}. ${esc(p.name)} — ${p.qty} шт`).join("\n") : "пока нет продаж";
+    const text = [
+      "📊 <b>Статистика</b>",
+      "",
+      `👤 Покупателей: ${u.total}, новых за 7 дней: ${u.new7d}`,
+      `🧾 Заказов всего: ${Object.values(o.byStatus).reduce((a, b) => a + b, 0)}`,
+      "",
+      "💰 <b>Выручка</b>",
+      `За день: ${formatRub(o.revenueDay)}`,
+      `За неделю: ${formatRub(o.revenueWeek)}`,
+      `За месяц: ${formatRub(o.revenueMonth)}`,
+      `За всё время: <b>${formatRub(o.revenue)}</b>`,
+      "",
+      `🏆 <b>Топ моделек</b>\n${top}`,
+    ].join("\n");
     await show(ctx, { text, kb: adminNav(new InlineKeyboard(), HOME) });
   });
 
@@ -361,6 +497,21 @@ export function createAdminComposer(
         else await catalog.renameCategory(a.id, text.slice(0, 60));
         ctx.session.flow = null;
         return void (await say(ctx, "✅ Сохранено.", new InlineKeyboard().text("🗂 Категории", "a:cs").text("🏠 Админка", HOME)));
+      }
+      case "category_photo": {
+        if (fileTooBig(ctx.msg!)) return void (await say(ctx, t("error.file_too_big"), cancelKb("a:x")));
+        if (!photo) return void (await say(ctx, "Пришли именно фото.", cancelKb("a:x")));
+        await catalog.setCategoryPhoto(a.id, photo);
+        ctx.session.flow = null;
+        return void (await say(ctx, "✅ Обложка сохранена.", new InlineKeyboard().text("🗂 Категории", "a:cs").text("🏠 Админка", HOME)));
+      }
+      case "banner_edit": {
+        if (fileTooBig(ctx.msg!)) return void (await say(ctx, t("error.file_too_big"), cancelKb("a:x")));
+        if (!photo) return void (await say(ctx, "Пришли именно фото.", cancelKb("a:x")));
+        await settings.set("menu_banner", photo);
+        ctx.session.flow = null;
+        logAction("admin.banner_updated", ctx);
+        return void (await say(ctx, "✅ Баннер обновлён.", new InlineKeyboard().text("✏️ Тексты", "a:ts").text("🏠 Админка", HOME)));
       }
       case "text_edit": {
         if (!text) return void (await say(ctx, "Пришли текст.", cancelKb("a:x")));

@@ -5,15 +5,14 @@ export interface CartItem {
   id: number;
   productId: number;
   name: string;
-  size: string;
-  color: string;
+  photo: string | null;
   price: number;
   qty: number;
 }
 
 // Скрытые админом товары в корзине не показываем и не продаём.
 const ITEMS_SQL = `
-  SELECT ci.id, ci.product_id, p.name, ci.size, ci.color, p.price, ci.qty
+  SELECT ci.id, ci.product_id, p.name, p.photos[1] AS photo, p.price, ci.qty
   FROM cart_items ci JOIN products p ON p.id = ci.product_id
   WHERE ci.user_id = $1 AND p.active ORDER BY ci.id`;
 
@@ -22,8 +21,7 @@ function toItem(r: any): CartItem {
     id: r.id,
     productId: r.product_id,
     name: r.name,
-    size: r.size,
-    color: r.color,
+    photo: r.photo,
     price: kopecksFromDb(r.price),
     qty: r.qty,
   };
@@ -31,11 +29,11 @@ function toItem(r: any): CartItem {
 
 export function createCartRepository(db: Queryable) {
   return {
-    async add(userId: number, productId: number, size: string, color: string): Promise<void> {
+    async add(userId: number, productId: number): Promise<void> {
       await db.query(
-        `INSERT INTO cart_items (user_id, product_id, size, color, qty) VALUES ($1, $2, $3, $4, 1)
-         ON CONFLICT (user_id, product_id, size, color) DO UPDATE SET qty = cart_items.qty + 1`,
-        [userId, productId, size, color],
+        `INSERT INTO cart_items (user_id, product_id, qty) VALUES ($1, $2, 1)
+         ON CONFLICT (user_id, product_id) DO UPDATE SET qty = cart_items.qty + 1`,
+        [userId, productId],
       );
     },
     async items(userId: number, q: Queryable = db): Promise<CartItem[]> {

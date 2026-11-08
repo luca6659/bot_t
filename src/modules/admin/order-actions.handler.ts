@@ -1,6 +1,8 @@
 // Кнопки под карточкой заказа в группе админов и связанный с ними ввод.
 import { Composer, InlineKeyboard } from "grammy";
 import type { AdminAction, MyContext } from "../../bot/context.js";
+import { fileTooBig } from "../../bot/guards.js";
+import { t } from "../../i18n/texts.js";
 import { logAction } from "../../infrastructure/logger.js";
 import { parseRub } from "../../views/format.js";
 import { action, cancelKb, show, threadOf } from "../../views/screen.js";
@@ -12,7 +14,8 @@ const DIRECT: Record<string, OrderStatus> = {
   paid: "paid",
   reject: "awaiting_payment",
   printing: "printing",
-  ready: "ready",
+  assembling: "assembling",
+  pickup_ready: "pickup_ready",
   done: "done",
   courier_skip: "courier",
   cancel_skip: "cancelled",
@@ -86,7 +89,26 @@ export function createOrderActions(orders: OrdersService) {
           await ctx.reply("Напиши срок текстом.", { reply_markup: cancelKb("a:x"), ...thread });
           return true;
         }
-        await finish(await orders.setQuote(a.orderId, a.price, text.slice(0, 100)));
+        ctx.session.flow = {
+          kind: "admin",
+          threadId: threadOf(ctx) ?? null,
+          action: { type: "quote_photo", orderId: a.orderId, price: a.price, deadline: text.slice(0, 100) },
+        };
+        const kb = new InlineKeyboard().text("Без фото", "a:qpn").row().text("❌ Отмена", "a:x");
+        await ctx.reply("🖼 Можешь прислать фото или рендер модели — покупатель увидит его вместе с ценой:", { reply_markup: kb, ...thread });
+        return true;
+      }
+      case "quote_photo": {
+        if (fileTooBig(ctx.msg!)) {
+          await ctx.reply(t("error.file_too_big"), { reply_markup: cancelKb("a:x"), ...thread });
+          return true;
+        }
+        const photo = ctx.msg!.photo?.at(-1)?.file_id ?? null;
+        if (!photo) {
+          await ctx.reply("Пришли фото или нажми «Без фото».", { reply_markup: cancelKb("a:x"), ...thread });
+          return true;
+        }
+        await finish(await orders.setQuote(a.orderId, a.price, a.deadline, photo));
         return true;
       }
       case "delivery_cost": {
@@ -115,6 +137,20 @@ export function createOrderActions(orders: OrdersService) {
         return false;
     }
   }
+
+  // «Без фото» на последнем шаге оценки своей модели.
+  action(composer, "a:qpn", async (ctx) => {
+    const flow = ctx.session.flow;
+    if (flow?.kind !== "admin" || flow.action.type !== "quote_photo") return;
+    const a = flow.action;
+    const order = await orders.setQuote(a.orderId, a.price, a.deadline, null);
+    ctx.session.flow = null;
+    await ctx.reply(orderDetails(order), {
+      parse_mode: "HTML",
+      reply_markup: adminOrderKb(order),
+      message_thread_id: threadOf(ctx),
+    });
+  });
 
   return { composer, handleInput };
 }

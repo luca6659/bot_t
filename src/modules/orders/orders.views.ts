@@ -1,25 +1,18 @@
 // Тексты и кнопки заказа. Одна карточка для покупателя и для админов, чтобы не дублировать логику.
 import { InlineKeyboard } from "grammy";
 import { t } from "../../i18n/texts.js";
-import { esc, formatRub, variantLabel } from "../../views/format.js";
+import { esc, formatRub } from "../../views/format.js";
 import { STATUS_LABELS, orderTotal, type Order } from "./orders.types.js";
 
 export function orderLines(o: Order): string {
   if (o.type === "custom") {
-    const lines = [`✨ Своя модель: ${esc(o.description || "по картинкам")}`];
-    if (o.size) lines.push(`📏 Размер: ${esc(o.size)}`);
-    if (o.color) lines.push(`🎨 Цвет: ${esc(o.color)}`);
+    const lines = [`🎨 Своя модель: ${esc(o.description || "по фото")}`];
+    if (o.wishes) lines.push(`📝 Пожелания: ${esc(o.wishes)}`);
     if (o.subtotal !== null) lines.push(`💰 Цена: ${formatRub(o.subtotal)}`);
     if (o.deadline) lines.push(`⏳ Срок: ${esc(o.deadline)}`);
     return lines.join("\n");
   }
-  return o.items
-    .map((i) => {
-      const variant = variantLabel(i.size, i.color);
-      const title = variant ? `${i.name} (${variant})` : i.name;
-      return `• ${esc(title)}: ${i.qty} × ${formatRub(i.price)}`;
-    })
-    .join("\n");
+  return o.items.map((i) => `• ${esc(i.name)}: ${i.qty} × ${formatRub(i.price)}`).join("\n");
 }
 
 export function deliveryLabel(o: Pick<Order, "delivery">): string {
@@ -34,6 +27,7 @@ export function orderDetails(o: Order): string {
   if (o.fullName) delivery.push(`Получатель: ${esc(o.fullName)}`);
   if (o.phone) delivery.push(`Телефон: ${esc(o.phone)}`);
   if (o.address) delivery.push(`Адрес: ${esc(o.address)}`);
+  if (o.comment) delivery.push(`Комментарий: ${esc(o.comment)}`);
   if (o.delivery) parts.push(delivery.join("\n"));
 
   const money: string[] = [];
@@ -74,17 +68,18 @@ export function adminOrderKb(o: Order): InlineKeyboard {
       act("❌ Чек не принят", "reject");
       break;
     case "paid":
-      act("🖨 В печать", "printing");
+      act(o.type === "custom" ? "🖨 В печать" : "📦 Собирается", o.type === "custom" ? "printing" : "assembling");
       break;
+    case "assembling":
     case "printing":
-      act("📦 Готов", "ready");
+      if (o.delivery === "courier") act("🚕 Передан курьеру", "courier");
+      else act("🏠 Ждёт самовывоза", "pickup_ready");
       break;
-    case "ready":
-      if (o.delivery === "courier") act("🚚 Передан курьеру", "courier");
-      else act("🎉 Выдан покупателю", "done");
+    case "pickup_ready":
+      act("🏁 Выдан покупателю", "done");
       break;
     case "courier":
-      act("🎉 Выполнен", "done");
+      act("🏁 Выполнен", "done");
       break;
     default:
       break;

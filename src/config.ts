@@ -4,6 +4,7 @@ import "dotenv/config";
 export interface Config {
   botToken: string;
   adminGroupId: number;
+  adminIds: number[];
   databaseUrl: string | null;
   webhookUrl: string | null;
   webhookSecret: string | null;
@@ -32,6 +33,8 @@ export function loadConfig(): Config {
   return {
     botToken: required("BOT_TOKEN"),
     adminGroupId,
+    // Через запятую: только эти люди могут пользоваться админкой. Пусто — любой в группе админов.
+    adminIds: (process.env.ADMIN_IDS ?? "").split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0),
     databaseUrl: process.env.DATABASE_URL || null,
     webhookUrl,
     webhookSecret,

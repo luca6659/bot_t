@@ -3,6 +3,7 @@ import type { Db } from "../../infrastructure/db.js";
 import { ConflictError, NotFoundError, ValidationError } from "../../infrastructure/errors.js";
 import { t } from "../../i18n/texts.js";
 import type { CartRepository } from "../cart/cart.repository.js";
+import type { PaymentProvider } from "../payment/payment.service.js";
 import type { SettingsService } from "../settings/settings.service.js";
 import type { OrdersRepository } from "./orders.repository.js";
 import { TRANSITIONS, type Contacts, type Order, type OrderStatus } from "./orders.types.js";
@@ -12,8 +13,10 @@ export interface OrderNotifier {
   invoice(order: Order): Promise<void>;
   quote(order: Order): Promise<void>;
   statusChanged(order: Order, previous: OrderStatus): Promise<void>;
-  // Админы: карточка заказа в теме покупателя.
+  // Админы: карточка заказа и закреп клиента в его теме, короткие уведомления в теме «Заказы».
   orderCard(order: Order, note?: string): Promise<void>;
+  clientCard(userId: number): Promise<void>;
+  systemNotice(text: string): Promise<void>;
   receipt(order: Order): Promise<void>;
   customPhotos(order: Order): Promise<void>;
   missingRequisites(order: Order): Promise<void>;
@@ -24,6 +27,7 @@ export function createOrdersService(
   orders: OrdersRepository,
   cart: CartRepository,
   settings: SettingsService,
+  payment: PaymentProvider,
   notifier: OrderNotifier,
 ) {
   async function mustGet(id: number): Promise<Order> {
@@ -40,6 +44,9 @@ export function createOrdersService(
 
   async function move(order: Order, to: OrderStatus, actor: string, extra: Parameters<OrdersRepository["changeStatus"]>[4] = {}) {
     if (!TRANSITIONS[order.status].includes(to)) throw new ConflictError(`${order.status} -> ${to}`);
+    // У каталога сборка, у своей модели — печать.
+    if (to === "printing" && order.type !== "custom") throw new ConflictError(`printing catalog order ${order.id}`);
+    if (to === "assembling" && order.type !== "catalog") throw new ConflictError(`assembling custom order ${order.id}`);
     const ok = await orders.changeStatus(order.id, order.status, to, actor, extra);
     if (!ok) throw new ConflictError(`race on order ${order.id}`);
     return mustGet(order.id);
@@ -48,7 +55,7 @@ export function createOrdersService(
   async function issueInvoice(order: Order, actor: string): Promise<Order> {
     const updated = await move(order, "awaiting_payment", actor);
     await notifier.invoice(updated);
-    if (!t("requisites")) await notifier.missingRequisites(updated);
+    if (payment.requisitesMissing()) await notifier.missingRequisites(updated);
     await notifier.orderCard(updated);
     return updated;
   }
@@ -67,6 +74,8 @@ export function createOrdersService(
   return {
     get: mustGet,
     getOwned: mustOwn,
+    firstPhoto: orders.firstPhoto,
+    customCountToday: orders.customCountToday,
 
     async createFromCart(userId: number, contacts: Contacts) {
       // Корзина очищается в той же транзакции: повторное нажатие не создаст второй заказ.
@@ -77,19 +86,21 @@ export function createOrdersService(
         await cart.clear(userId, q);
         return orderId;
       });
+      await notifier.systemNotice(`🆕 Новый заказ №${id}`);
       return afterDeliveryChosen(await mustGet(id));
     },
 
-    async createCustom(userId: number, description: string, size: string, color: string, photos: string[]) {
-      const id = await orders.createCustom(userId, description, size, color, photos);
+    async createCustom(userId: number, description: string, wishes: string, photos: string[]) {
+      const id = await orders.createCustom(userId, description, wishes, photos);
       const order = await mustGet(id);
+      await notifier.systemNotice(`🎨 Новая заявка на свою модель №${id}`);
       await notifier.orderCard(order, "✨ Новая заявка на свою модель");
       if (order.photos.length) await notifier.customPhotos(order);
       return order;
     },
 
-    async setQuote(id: number, price: number, deadline: string) {
-      if (!(await orders.setQuote(id, price, deadline))) throw new ConflictError(`quote on order ${id}`);
+    async setQuote(id: number, price: number, deadline: string, quotePhoto: string | null) {
+      if (!(await orders.setQuote(id, price, deadline, quotePhoto))) throw new ConflictError(`quote on order ${id}`);
       const order = await mustGet(id);
       await notifier.quote(order);
       return order;
@@ -130,6 +141,7 @@ export function createOrdersService(
       if (order.status !== "awaiting_payment") throw new ConflictError(`receipt on order ${id}`, "Этот заказ сейчас не ждёт оплаты.");
       const updated = await move(order, "receipt_check", "client", { receipt: { fileId, kind } });
       await notifier.receipt(updated);
+      await notifier.systemNotice(`🧾 Новый чек по заказу №${id}`);
       await notifier.orderCard(updated, "🔍 Покупатель прислал чек");
       return updated;
     },
@@ -139,6 +151,7 @@ export function createOrdersService(
       const order = await mustGet(id);
       const updated = await move(order, to, actor, extra);
       await notifier.statusChanged(updated, order.status);
+      await notifier.clientCard(order.userId);
       return updated;
     },
 

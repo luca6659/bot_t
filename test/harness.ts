@@ -45,6 +45,7 @@ export class Harness {
   private nextMessageId = 1000;
   private nextThreadId = 500;
   private nextUpdateId = 1;
+  adminIds: number[] = [];
   app!: Awaited<ReturnType<typeof createBot>>;
 
   private constructor(public db: Db) {}
@@ -62,6 +63,7 @@ export class Harness {
     this.app = await createBot({
       token: "1:test",
       adminGroupId: GROUP,
+      adminIds: this.adminIds,
       db: this.db,
       broadcastDelayMs: 0,
       rateLimit: 100_000,
@@ -85,7 +87,7 @@ export class Harness {
           if (method === "createForumTopic") {
             return { ok: true, result: { message_thread_id: ++this.nextThreadId, name: payload.name, icon_color: 0 } } as any;
           }
-          if (method === "answerCallbackQuery" || method === "deleteMessage" || method === "editForumTopic") {
+          if (["answerCallbackQuery", "deleteMessage", "editForumTopic", "pinChatMessage", "unpinChatMessage"].includes(method)) {
             return { ok: true, result: true } as any;
           }
           call.messageId = payload.message_id && method.startsWith("edit") ? payload.message_id : ++this.nextMessageId;
@@ -120,14 +122,14 @@ export class Harness {
     });
   }
 
-  // Сообщение админа в группе. threadId: тема покупателя.
-  async adminSay(content: string | Record<string, unknown>, threadId?: number, chatId = GROUP): Promise<void> {
+  // Сообщение админа в группе. threadId: тема покупателя, from: кто пишет.
+  async adminSay(content: string | Record<string, unknown>, threadId?: number, chatId = GROUP, from = ADMIN): Promise<void> {
     const body = typeof content === "string" ? { text: content } : content;
     const text = (body as any).text as string | undefined;
     await this.update({
       message: {
         message_id: ++this.nextMessageId, date: 0, chat: { id: chatId, type: "supergroup", title: "Админы", is_forum: true },
-        from: this.fromUser(ADMIN), ...body,
+        from: this.fromUser(from), ...body,
         ...(threadId ? { message_thread_id: threadId, is_topic_message: true } : {}),
         ...(text?.startsWith("/") ? { entities: [{ type: "bot_command", offset: 0, length: text.split(" ")[0]!.length }] } : {}),
       } as any,
@@ -190,8 +192,8 @@ export class Harness {
 
   texts(chatId: number): string[] {
     return this.calls
-      .filter((c) => c.payload.chat_id === chatId && (c.payload.text ?? c.payload.caption))
-      .map((c) => c.payload.text ?? c.payload.caption);
+      .filter((c) => c.payload.chat_id === chatId && (c.payload.text ?? c.payload.caption ?? c.payload.media?.caption))
+      .map((c) => c.payload.text ?? c.payload.caption ?? c.payload.media?.caption);
   }
 
   lastText(chatId: number): string {
@@ -208,8 +210,16 @@ export class Harness {
       .then((r) => r.rows[0]!.topic_id);
   }
 
-  // Товар через настоящую админку, со всеми шагами.
-  async addProduct(p: { name: string; price: string; sizes?: string; colors?: string; photo?: boolean; category?: string }): Promise<void> {
+  // Моделька через настоящую админку, со всеми шагами: имя → описание → фото → категория → цена → наличие → метки.
+  async addProduct(p: {
+    name: string;
+    price: string;
+    photos?: string[];
+    photo?: boolean;
+    category?: string;
+    stock?: "in_stock" | "on_order";
+    badges?: "hit" | "new" | "both" | "none";
+  }): Promise<void> {
     await this.adminSay("/admin");
     const category = p.category ?? "Животные";
     const { rows } = await this.db.query(`SELECT 1 FROM categories WHERE name = $1`, [category]);
@@ -219,16 +229,20 @@ export class Harness {
       await this.adminSay(category);
       await this.press(GROUP, /Админка/, ADMIN);
     }
-    await this.press(GROUP, /Товары/, ADMIN);
-    await this.press(GROUP, /Добавить товар/, ADMIN);
-    await this.press(GROUP, new RegExp(category), ADMIN);
+    await this.press(GROUP, /Модельки/, ADMIN);
+    await this.press(GROUP, /Добавить модельку/, ADMIN);
     await this.adminSay(p.name);
-    if (p.photo === false) await this.press(GROUP, /Без фото/, ADMIN);
-    else await this.adminSay({ photo: [{ file_id: "small", file_unique_id: "a", width: 1, height: 1 }, { file_id: `photo-${p.name}`, file_unique_id: "b", width: 9, height: 9 }] });
     await this.adminSay(`Описание: ${p.name}`);
+    const photos = p.photos ?? (p.photo === false ? [] : [`photo-${p.name}`]);
+    for (const id of photos) {
+      await this.adminSay({ photo: [{ file_id: "small", file_unique_id: "a", width: 1, height: 1 }, { file_id: id, file_unique_id: `u-${id}`, width: 9, height: 9 }] });
+    }
+    await this.press(GROUP, /Готово/, ADMIN);
+    await this.press(GROUP, new RegExp(category), ADMIN);
     await this.adminSay(p.price);
-    await this.adminSay(p.sizes ?? "-");
-    await this.adminSay(p.colors ?? "-");
+    await this.press(GROUP, p.stock === "on_order" ? /Под заказ/ : /В наличии/, ADMIN);
+    const badges = p.badges ?? "none";
+    await this.press(GROUP, badges === "none" ? /Без меток/ : badges === "both" ? /🔥 \+ 🆕/ : badges === "hit" ? /^🔥 Хит$/ : /^🆕 Новинка$/, ADMIN);
   }
 }
 

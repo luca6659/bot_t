@@ -1,30 +1,27 @@
 import { Composer, InlineKeyboard } from "grammy";
 import type { MyContext } from "../../bot/context.js";
 import { t } from "../../i18n/texts.js";
-import { esc, formatRub, variantLabel } from "../../views/format.js";
+import { esc, formatRub } from "../../views/format.js";
 import { action, navRow, show } from "../../views/screen.js";
+import type { SettingsService } from "../settings/settings.service.js";
 import type { CartRepository } from "./cart.repository.js";
 
-export function createCartComposer(cart: CartRepository): Composer<MyContext> {
+export function createCartComposer(cart: CartRepository, settings: SettingsService): Composer<MyContext> {
   const composer = new Composer<MyContext>();
 
   async function showCart(ctx: MyContext): Promise<void> {
     const items = await cart.items(ctx.from!.id);
     if (items.length === 0) {
       const kb = new InlineKeyboard().text(t("btn.catalog"), "cat");
-      return show(ctx, { text: t("cart.empty"), kb: navRow(kb, "m") });
+      return show(ctx, { text: t("cart.empty"), kb: navRow(kb, "m"), photo: settings.get("menu_banner") ?? null });
     }
 
-    const lines = items.map((i) => {
-      const variant = variantLabel(i.size, i.color);
-      const title = variant ? `${i.name} (${variant})` : i.name;
-      return `• ${esc(title)}: ${i.qty} × ${formatRub(i.price)} = ${formatRub(i.qty * i.price)}`;
-    });
+    const lines = items.map((i) => `• ${esc(i.name)}: ${i.qty} × ${formatRub(i.price)} = ${formatRub(i.qty * i.price)}`);
     const total = items.reduce((sum, i) => sum + i.qty * i.price, 0);
 
     const kb = new InlineKeyboard();
     for (const i of items) {
-      kb.text(i.name, "noop").row();
+      kb.text(`🧸 ${i.name}`, "noop").row();
       kb.text("➖", `ci:${i.id}:dec`).text(`${i.qty} шт`, "noop").text("➕", `ci:${i.id}:inc`).text("🗑", `ci:${i.id}:del`).row();
     }
     kb.text(t("btn.checkout"), "co").row().text(t("btn.clear_cart"), "cc");
@@ -32,6 +29,7 @@ export function createCartComposer(cart: CartRepository): Composer<MyContext> {
     await show(ctx, {
       text: `${t("cart.title")}\n\n${lines.join("\n")}\n\n${t("cart.total", { total: formatRub(total) })}`,
       kb: navRow(kb, "m"),
+      photo: items.find((i) => i.photo)?.photo ?? settings.get("menu_banner") ?? null,
     });
   }
 

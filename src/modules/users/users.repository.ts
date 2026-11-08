@@ -8,6 +8,8 @@ export interface User {
   savedName: string | null;
   savedPhone: string | null;
   savedAddress: string | null;
+  banned: boolean;
+  pinnedMessageId: number | null;
 }
 
 function toUser(r: any): User {
@@ -19,6 +21,8 @@ function toUser(r: any): User {
     savedName: r.saved_name,
     savedPhone: r.saved_phone,
     savedAddress: r.saved_address,
+    banned: r.banned,
+    pinnedMessageId: r.pinned_message_id,
   };
 }
 
@@ -42,7 +46,13 @@ export function createUsersRepository(db: Queryable) {
       return rows[0] ? toUser(rows[0]) : null;
     },
     async setTopic(id: number, topicId: number | null): Promise<void> {
-      await db.query(`UPDATE users SET topic_id = $2 WHERE id = $1`, [id, topicId]);
+      await db.query(`UPDATE users SET topic_id = $2, pinned_message_id = NULL WHERE id = $1`, [id, topicId]);
+    },
+    async setPinnedMessage(id: number, messageId: number | null): Promise<void> {
+      await db.query(`UPDATE users SET pinned_message_id = $2 WHERE id = $1`, [id, messageId]);
+    },
+    async setBanned(id: number, banned: boolean): Promise<void> {
+      await db.query(`UPDATE users SET banned = $2 WHERE id = $1`, [id, banned]);
     },
     async saveContacts(id: number, name: string | null, phone: string | null, address: string | null): Promise<void> {
       await db.query(
@@ -56,13 +66,15 @@ export function createUsersRepository(db: Queryable) {
     },
     async nextForBroadcast(afterId: number, limit: number): Promise<number[]> {
       const { rows } = await db.query<{ id: unknown }>(
-        `SELECT id FROM users WHERE id > $1 AND blocked_bot = FALSE ORDER BY id LIMIT $2`,
+        `SELECT id FROM users WHERE id > $1 AND blocked_bot = FALSE AND banned = FALSE ORDER BY id LIMIT $2`,
         [afterId, limit],
       );
       return rows.map((r) => Number(r.id));
     },
     async countActive(): Promise<number> {
-      const { rows } = await db.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM users WHERE blocked_bot = FALSE`);
+      const { rows } = await db.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM users WHERE blocked_bot = FALSE AND banned = FALSE`,
+      );
       return rows[0]!.n;
     },
     async stats(): Promise<{ total: number; new7d: number }> {

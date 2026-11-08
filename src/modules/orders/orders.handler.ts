@@ -1,16 +1,18 @@
 // «Мои заказы» глазами покупателя: список, карточка, чек, отмена, отказ от цены.
 import { Composer, InlineKeyboard } from "grammy";
 import type { MyContext } from "../../bot/context.js";
+import { fileTooBig } from "../../bot/guards.js";
 import { t } from "../../i18n/texts.js";
 import { logAction } from "../../infrastructure/logger.js";
 import { formatRub } from "../../views/format.js";
 import { action, cancelKb, navRow, pagerRow, show } from "../../views/screen.js";
+import type { SettingsService } from "../settings/settings.service.js";
 import { ORDERS_PAGE_SIZE } from "./orders.repository.js";
 import type { OrdersService } from "./orders.service.js";
 import { STATUS_LABELS, orderTotal } from "./orders.types.js";
 import { invoiceText, orderDetails } from "./orders.views.js";
 
-export function createOrdersComposer(orders: OrdersService): Composer<MyContext> {
+export function createOrdersComposer(orders: OrdersService, settings: SettingsService): Composer<MyContext> {
   const composer = new Composer<MyContext>();
 
   async function showOrder(ctx: MyContext, id: number): Promise<void> {
@@ -18,13 +20,15 @@ export function createOrdersComposer(orders: OrdersService): Composer<MyContext>
     const kb = new InlineKeyboard();
     if (order.status === "awaiting_payment") kb.text(t("btn.send_receipt"), `r:${id}`).row();
     if (order.type === "custom" && order.status === "new" && order.subtotal !== null && !order.quoteAccepted) {
-      kb.text(t("btn.accept_quote"), `qa:${id}`).text(t("btn.reject_quote"), `qr:${id}`).row();
+      kb.text(t("btn.accept_quote"), `qa:${id}`).row();
+      kb.text(t("btn.discuss_quote"), `w:${id}`).text(t("btn.reject_quote"), `qr:${id}`).row();
     }
     if (order.status === "new" && order.quoteAccepted && !order.delivery) kb.text(t("btn.continue_checkout"), `qc:${id}`).row();
     kb.text(t("btn.write_order"), `w:${id}`).row();
     if (order.status === "new" || order.status === "awaiting_payment") kb.text(t("btn.cancel_order"), `ox:${id}`).row();
     const text = order.status === "awaiting_payment" ? invoiceText(order) : orderDetails(order);
-    await show(ctx, { text, kb: navRow(kb, "os:0") });
+    const photo = await orders.firstPhoto(order);
+    await show(ctx, { text, kb: navRow(kb, "os:0"), photo: photo ?? settings.get("menu_banner") ?? null });
   }
 
   action(composer, /^os:(\d+)$/, async (ctx) => {
@@ -32,7 +36,7 @@ export function createOrdersComposer(orders: OrdersService): Composer<MyContext>
     const result = await orders.list(ctx.from!.id, page);
     if (result.total === 0) {
       const kb = new InlineKeyboard().text(t("btn.catalog"), "cat");
-      return show(ctx, { text: t("orders.empty"), kb: navRow(kb, "m") });
+      return show(ctx, { text: t("orders.empty"), kb: navRow(kb, "m"), photo: settings.get("menu_banner") ?? null });
     }
     const kb = new InlineKeyboard();
     for (const o of result.items) {
@@ -40,7 +44,7 @@ export function createOrdersComposer(orders: OrdersService): Composer<MyContext>
       kb.text(`№${o.id} · ${STATUS_LABELS[o.status]}${sum}`, `o:${o.id}`).row();
     }
     pagerRow(kb, page, Math.ceil(result.total / ORDERS_PAGE_SIZE), (p) => `os:${p}`);
-    await show(ctx, { text: t("orders.title"), kb: navRow(kb, "m") });
+    await show(ctx, { text: t("orders.title"), kb: navRow(kb, "m"), photo: settings.get("menu_banner") ?? null });
   });
 
   action(composer, /^o:(\d+)$/, (ctx) => showOrder(ctx, Number(ctx.match[1])));
@@ -77,6 +81,7 @@ export function createOrdersComposer(orders: OrdersService): Composer<MyContext>
     const flow = ctx.session.flow;
     if (flow?.kind !== "receipt") return next();
 
+    if (fileTooBig(ctx.msg)) return ctx.reply(t("error.file_too_big"), { reply_markup: cancelKb() });
     const photo = ctx.msg.photo?.at(-1)?.file_id;
     const doc = ctx.msg.document?.file_id;
     if (!photo && !doc) return ctx.reply(t("receipt.need_file"), { reply_markup: cancelKb() });

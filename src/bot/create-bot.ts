@@ -8,6 +8,7 @@ import { AppError, toUserMessage } from "../infrastructure/errors.js";
 import { logger } from "../infrastructure/logger.js";
 import { createSessionStorage } from "../infrastructure/session-storage.js";
 import { t } from "../i18n/texts.js";
+import { esc } from "../views/format.js";
 import { createAdminComposer } from "../modules/admin/admin.handler.js";
 import { createBroadcastService } from "../modules/broadcast/broadcast.service.js";
 import { createCartComposer } from "../modules/cart/cart.handler.js";
@@ -21,6 +22,7 @@ import { createOrdersComposer } from "../modules/orders/orders.handler.js";
 import { createOrderNotifier } from "../modules/orders/orders.notifier.js";
 import { createOrdersRepository } from "../modules/orders/orders.repository.js";
 import { createOrdersService } from "../modules/orders/orders.service.js";
+import { createManualPaymentProvider } from "../modules/payment/payment.service.js";
 import { createAdminRelayComposer, createClientRelayComposer } from "../modules/relay/relay.handler.js";
 import { createTopicsService } from "../modules/relay/topics.service.js";
 import { createSettingsService } from "../modules/settings/settings.service.js";
@@ -30,6 +32,8 @@ import { initialSession, type MyContext, type SessionData } from "./context.js";
 export interface BotOptions {
   token: string;
   adminGroupId: number;
+  // Если список задан, админка и ответы клиентам доступны только этим ID. Пустой — любой в группе.
+  adminIds?: number[];
   db: Db;
   botConfig?: BotConfig<MyContext>;
   broadcastDelayMs?: number;
@@ -42,6 +46,7 @@ const ERROR_NOTICE_INTERVAL_MS = 60_000;
 
 export async function createBot(options: BotOptions) {
   const { adminGroupId, db } = options;
+  const adminIds = options.adminIds ?? [];
   const bot = new Bot<MyContext>(options.token, options.botConfig);
   if (options.configureApi) options.configureApi(bot);
   else bot.api.config.use(autoRetry());
@@ -63,9 +68,11 @@ export async function createBot(options: BotOptions) {
   const settings = createSettingsService(db);
   await settings.load();
 
-  const topics = createTopicsService(bot.api, adminGroupId, users);
-  const notifier = createOrderNotifier(bot.api, adminGroupId, topics, users);
-  const orders = createOrdersService(db, ordersRepo, cart, settings, notifier);
+  const payment = createManualPaymentProvider(settings);
+  const topics = createTopicsService(bot.api, adminGroupId, users, settings);
+  const notifier = createOrderNotifier(bot.api, adminGroupId, topics, users, ordersRepo, payment);
+  topics.setOnCreated((userId) => notifier.clientCard(userId));
+  const orders = createOrdersService(db, ordersRepo, cart, settings, payment, notifier);
   const broadcast = createBroadcastService(
     db,
     users,
@@ -82,7 +89,7 @@ export async function createBot(options: BotOptions) {
     options.broadcastDelayMs,
   );
 
-  // Последний рубеж: покупатель видит понятный текст, админы узнают о сбое.
+  // Последний рубеж: покупатель видит понятный текст, админы узнают о сбое в теме «⚠️ Ошибки».
   let lastNoticeAt = 0;
   async function handleError(err: BotError<MyContext>): Promise<void> {
     const { ctx, error } = err;
@@ -95,7 +102,10 @@ export async function createBot(options: BotOptions) {
     const isExpected = error instanceof AppError || (error instanceof GrammyError && error.error_code === 403);
     if (!isExpected && Date.now() - lastNoticeAt > ERROR_NOTICE_INTERVAL_MS) {
       lastNoticeAt = Date.now();
-      await bot.api.sendMessage(adminGroupId, `🔴 Ошибка в боте: ${String(error).slice(0, 500)}`).catch(() => {});
+      const notice = `🔴 Ошибка в боте: ${esc(String(error).slice(0, 500))}`;
+      await topics.sendToSystem("errors", notice).catch(() =>
+        bot.api.sendMessage(adminGroupId, notice, { parse_mode: "HTML" }).catch(() => {}),
+      );
     }
   }
   bot.catch(handleError);
@@ -119,14 +129,22 @@ export async function createBot(options: BotOptions) {
     }),
   );
 
-  // Служебная команда для настройки: показывает ID группы.
+  // Служебная команда для настройки: показывает ID группы и свой ID (для ADMIN_IDS).
   app.chatType(["group", "supergroup"]).command("chatid", (ctx) =>
-    ctx.reply(`ID этой группы: <code>${ctx.chat.id}</code>`, { parse_mode: "HTML", message_thread_id: ctx.msg.message_thread_id }),
+    ctx.reply(`ID этой группы: <code>${ctx.chat.id}</code>\nТвой ID: <code>${ctx.from?.id}</code>`, { parse_mode: "HTML", message_thread_id: ctx.msg.message_thread_id }),
   );
 
   // Группа админов.
   const adminGroup = new Composer<MyContext>();
-  adminGroup.use(createAdminComposer(catalog, orders, settings, users, broadcast));
+  adminGroup.use(async (ctx, next) => {
+    if (adminIds.length && ctx.from && !adminIds.includes(ctx.from.id)) {
+      if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: "Нет доступа", show_alert: true }).catch(() => {});
+      else if (ctx.msg?.text?.startsWith("/admin")) await ctx.reply("Нет доступа.").catch(() => {});
+      return;
+    }
+    await next();
+  });
+  adminGroup.use(createAdminComposer(catalog, orders, settings, users, broadcast, notifier));
   adminGroup.use(createAdminRelayComposer(users));
   app.filter((ctx) => ctx.chat?.id === adminGroupId, adminGroup);
 
@@ -144,6 +162,12 @@ export async function createBot(options: BotOptions) {
   );
   client.use(async (ctx, next) => {
     if (ctx.from) await users.touch(ctx.from.id, ctx.from.first_name, ctx.from.username ?? null);
+    const user = ctx.from ? await users.get(ctx.from.id) : null;
+    if (user?.banned) {
+      if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+      else await ctx.reply(t("error.banned"));
+      return;
+    }
     if (settings.isMaintenance()) {
       if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
       await ctx.reply(t("maintenance"), { parse_mode: "HTML" });
@@ -151,12 +175,12 @@ export async function createBot(options: BotOptions) {
     }
     await next();
   });
-  client.use(createMainMenuComposer(cart));
-  client.use(createCatalogComposer(catalog, cart));
-  client.use(createCartComposer(cart));
+  client.use(createMainMenuComposer(cart, settings));
+  client.use(createCatalogComposer(catalog, cart, settings));
+  client.use(createCartComposer(cart, settings));
   client.use(createCheckoutComposer(orders, cart, users));
   client.use(createCustomComposer(orders));
-  client.use(createOrdersComposer(orders));
+  client.use(createOrdersComposer(orders, settings));
   client.use(createClientRelayComposer(adminGroupId, topics, orders));
   app.filter((ctx) => ctx.chat?.type === "private", client);
 

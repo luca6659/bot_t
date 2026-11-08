@@ -1,6 +1,7 @@
-// Заявка на свою модель: идея, картинки, размер, цвет.
+// Заявка на свою модель: идея и референсы, пожелания и сроки, подтверждение.
 import { Composer, InlineKeyboard } from "grammy";
 import type { Flow, MyContext } from "../../bot/context.js";
+import { fileTooBig } from "../../bot/guards.js";
 import { t } from "../../i18n/texts.js";
 import { ValidationError } from "../../infrastructure/errors.js";
 import { logAction } from "../../infrastructure/logger.js";
@@ -12,9 +13,14 @@ type CustomFlow = Extract<Flow, { kind: "custom" }>;
 
 const MAX_PHOTOS = 10;
 const MAX_TEXT = 1500;
+const MAX_PER_DAY = 5;
 
 function descriptionKb(): InlineKeyboard {
   return new InlineKeyboard().text(t("btn.done"), "cud").row().text(t("btn.cancel"), "x");
+}
+
+function stepKb(extra?: InlineKeyboard): InlineKeyboard {
+  return (extra ?? new InlineKeyboard()).row().text(t("btn.back"), "cub").text(t("btn.cancel"), "x");
 }
 
 export function createCustomComposer(orders: OrdersService): Composer<MyContext> {
@@ -28,16 +34,18 @@ export function createCustomComposer(orders: OrdersService): Composer<MyContext>
 
   function showSummary(ctx: MyContext, flow: CustomFlow): Promise<void> {
     const lines = [
-      `✨ ${esc(flow.description || "по картинкам")}`,
-      `🖼 Картинок: ${flow.photos.length}`,
-      `📏 Размер: ${esc(flow.size ?? "")}`,
-      `🎨 Цвет: ${esc(flow.color || "на усмотрение мастера")}`,
+      `✨ ${esc(flow.description || "по фото")}`,
+      `🖼 Фото: ${flow.photos.length}`,
+      `📝 Пожелания: ${esc(flow.wishes || "без особенностей")}`,
     ];
-    const kb = new InlineKeyboard().text(t("btn.confirm"), "cuf").row().text(t("btn.cancel"), "x");
-    return show(ctx, { text: t("custom.summary", { details: lines.join("\n") }), kb });
+    const kb = new InlineKeyboard().text(t("btn.confirm"), "cuf");
+    return show(ctx, { text: t("custom.summary", { details: lines.join("\n") }), kb: stepKb(kb) });
   }
 
   action(composer, "cu", async (ctx) => {
+    if ((await orders.customCountToday(ctx.from!.id)) >= MAX_PER_DAY) {
+      throw new ValidationError(t("custom.daily_limit"));
+    }
     ctx.session.flow = { kind: "custom", step: "description", description: "", photos: [] };
     await show(ctx, { text: t("custom.description"), kb: descriptionKb() });
   });
@@ -45,21 +53,29 @@ export function createCustomComposer(orders: OrdersService): Composer<MyContext>
   action(composer, "cud", async (ctx) => {
     const flow = flowOf(ctx);
     if (!flow.description && flow.photos.length === 0) throw new ValidationError(t("custom.need_description"));
-    flow.step = "size";
-    await show(ctx, { text: t("custom.size"), kb: cancelKb() });
+    flow.step = "wishes";
+    await show(ctx, { text: t("custom.wishes"), kb: stepKb(new InlineKeyboard().text(t("btn.skip"), "cuw")) });
   });
 
-  action(composer, "cus", async (ctx) => {
+  action(composer, "cuw", async (ctx) => {
     const flow = flowOf(ctx);
-    flow.color = "";
+    flow.wishes = undefined;
     flow.step = "confirm";
     await showSummary(ctx, flow);
+  });
+
+  action(composer, "cub", async (ctx) => {
+    const flow = flowOf(ctx);
+    flow.step = flow.step === "confirm" ? "wishes" : "description";
+    if (flow.step === "description") await show(ctx, { text: t("custom.description"), kb: descriptionKb() });
+    else await show(ctx, { text: t("custom.wishes"), kb: stepKb(new InlineKeyboard().text(t("btn.skip"), "cuw")) });
   });
 
   action(composer, "cuf", async (ctx) => {
     const flow = flowOf(ctx);
     if (flow.step !== "confirm") throw new ValidationError("Заявка ещё не заполнена.");
-    const order = await orders.createCustom(ctx.from!.id, flow.description, flow.size ?? "", flow.color ?? "", flow.photos);
+    if ((await orders.customCountToday(ctx.from!.id)) >= MAX_PER_DAY) throw new ValidationError(t("custom.daily_limit"));
+    const order = await orders.createCustom(ctx.from!.id, flow.description, flow.wishes ?? "", flow.photos);
     ctx.session.flow = null;
     logAction("order.custom_created", ctx, { orderId: order.id });
     await show(ctx, { text: t("custom.created", { id: order.id }), kb: navRow(new InlineKeyboard().text(t("btn.orders"), `o:${order.id}`), "m") });
@@ -71,6 +87,7 @@ export function createCustomComposer(orders: OrdersService): Composer<MyContext>
     const text = ctx.msg.text?.trim();
 
     if (flow.step === "description") {
+      if (fileTooBig(ctx.msg)) return ctx.reply(t("error.file_too_big"), { reply_markup: descriptionKb() });
       const photo = ctx.msg.photo?.at(-1)?.file_id;
       const part = (text ?? ctx.msg.caption ?? "").trim();
       if (photo && flow.photos.length < MAX_PHOTOS) flow.photos.push(photo);
@@ -86,18 +103,9 @@ export function createCustomComposer(orders: OrdersService): Composer<MyContext>
       );
     }
 
-    if (flow.step === "size") {
-      if (!text) return ctx.reply(t("custom.size"), { reply_markup: cancelKb() });
-      flow.size = text.slice(0, 100);
-      flow.step = "color";
-      return ctx.reply(t("custom.color"), {
-        reply_markup: new InlineKeyboard().text(t("btn.skip"), "cus").row().text(t("btn.cancel"), "x"),
-      });
-    }
-
-    if (flow.step === "color") {
-      if (!text) return ctx.reply(t("custom.color"), { reply_markup: cancelKb() });
-      flow.color = text.slice(0, 100);
+    if (flow.step === "wishes") {
+      if (!text) return ctx.reply(t("custom.wishes"), { reply_markup: stepKb() });
+      flow.wishes = text.slice(0, 500);
       flow.step = "confirm";
       return showSummary(ctx, flow);
     }

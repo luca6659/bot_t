@@ -119,6 +119,47 @@ const MIGRATIONS: string[] = [
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
   `,
+  `
+  -- Одна моделька = одна цена, без размеров и цветов. Фото стало галереей.
+  ALTER TABLE products ADD COLUMN photos TEXT[] NOT NULL DEFAULT '{}';
+  UPDATE products SET photos = ARRAY[photo_file_id] WHERE photo_file_id IS NOT NULL;
+  ALTER TABLE products DROP COLUMN photo_file_id;
+  ALTER TABLE products DROP COLUMN sizes;
+  ALTER TABLE products DROP COLUMN colors;
+  ALTER TABLE products ADD COLUMN is_hit BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE products ADD COLUMN is_new BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE products ADD COLUMN stock TEXT NOT NULL DEFAULT 'in_stock' CHECK (stock IN ('in_stock','on_order'));
+
+  ALTER TABLE categories ADD COLUMN photo_file_id TEXT;
+  ALTER TABLE categories ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+
+  -- Корзина: одна моделька = одна строка, повторные варианты сливаем в количество.
+  UPDATE cart_items ci SET qty = t.total FROM (
+    SELECT user_id, product_id, SUM(qty) AS total FROM cart_items GROUP BY user_id, product_id
+  ) t WHERE ci.user_id = t.user_id AND ci.product_id = t.product_id;
+  DELETE FROM cart_items WHERE id NOT IN (SELECT MIN(id) FROM cart_items GROUP BY user_id, product_id);
+  ALTER TABLE cart_items DROP CONSTRAINT cart_items_user_id_product_id_size_color_key;
+  ALTER TABLE cart_items DROP COLUMN size;
+  ALTER TABLE cart_items DROP COLUMN color;
+  ALTER TABLE cart_items ADD UNIQUE (user_id, product_id);
+
+  ALTER TABLE orders DROP COLUMN size;
+  ALTER TABLE orders DROP COLUMN color;
+  ALTER TABLE orders ADD COLUMN comment TEXT;
+  ALTER TABLE orders ADD COLUMN wishes TEXT;
+  ALTER TABLE orders ADD COLUMN quote_photo_file_id TEXT;
+  UPDATE orders SET status = CASE
+    WHEN status = 'printing' AND type = 'catalog' THEN 'assembling'
+    WHEN status = 'ready' AND delivery = 'pickup' THEN 'pickup_ready'
+    WHEN status = 'ready' THEN 'courier'
+    ELSE status END;
+
+  ALTER TABLE order_items DROP COLUMN size;
+  ALTER TABLE order_items DROP COLUMN color;
+
+  ALTER TABLE users ADD COLUMN banned BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE users ADD COLUMN pinned_message_id INTEGER;
+  `,
 ];
 
 export async function runMigrations(db: Db): Promise<void> {
