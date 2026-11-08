@@ -10,6 +10,7 @@ import { createSessionStorage } from "../infrastructure/session-storage.js";
 import { t } from "../i18n/texts.js";
 import { esc } from "../views/format.js";
 import { createAdminComposer } from "../modules/admin/admin.handler.js";
+import { createCallmeService, createHttpTransport } from "../modules/callme/callme.service.js";
 import { createBroadcastService } from "../modules/broadcast/broadcast.service.js";
 import { createCartComposer } from "../modules/cart/cart.handler.js";
 import { createCartRepository } from "../modules/cart/cart.repository.js";
@@ -34,6 +35,8 @@ export interface BotOptions {
   adminGroupId: number;
   // Если список задан, админка и ответы клиентам доступны только этим ID. Пустой — любой в группе.
   adminIds?: number[];
+  // 10-значный номер call-me для звонка владельцу при новом заказе. Пусто — звонки выключены.
+  callmeNumber?: string | null;
   db: Db;
   botConfig?: BotConfig<MyContext>;
   broadcastDelayMs?: number;
@@ -72,7 +75,11 @@ export async function createBot(options: BotOptions) {
   const topics = createTopicsService(bot.api, adminGroupId, users, settings);
   const notifier = createOrderNotifier(bot.api, adminGroupId, topics, users, ordersRepo, payment);
   topics.setOnCreated((userId) => notifier.clientCard(userId));
-  const orders = createOrdersService(db, ordersRepo, cart, settings, payment, notifier);
+  // Звонки владельцу: голосовой ответ приходит текстом в тему «🔔 Заказы».
+  const callme = createCallmeService(options.callmeNumber ?? null, createHttpTransport(), (text) =>
+    topics.sendToSystem("orders", `📞 ${esc(text)}`),
+  );
+  const orders = createOrdersService(db, ordersRepo, cart, settings, payment, notifier, callme);
   const broadcast = createBroadcastService(
     db,
     users,

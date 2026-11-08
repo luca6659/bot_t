@@ -2,6 +2,7 @@
 import type { Db } from "../../infrastructure/db.js";
 import { ConflictError, NotFoundError, ValidationError } from "../../infrastructure/errors.js";
 import { t } from "../../i18n/texts.js";
+import type { CallmeService } from "../callme/callme.service.js";
 import type { CartRepository } from "../cart/cart.repository.js";
 import type { PaymentProvider } from "../payment/payment.service.js";
 import type { SettingsService } from "../settings/settings.service.js";
@@ -29,6 +30,7 @@ export function createOrdersService(
   settings: SettingsService,
   payment: PaymentProvider,
   notifier: OrderNotifier,
+  callme?: CallmeService,
 ) {
   async function mustGet(id: number): Promise<Order> {
     const order = await orders.get(id);
@@ -87,13 +89,16 @@ export function createOrdersService(
         return orderId;
       });
       await notifier.systemNotice(`🆕 Новый заказ №${id}`);
-      return afterDeliveryChosen(await mustGet(id));
+      const order = await mustGet(id);
+      callme?.ringOrder(order);
+      return afterDeliveryChosen(order);
     },
 
     async createCustom(userId: number, description: string, wishes: string, photos: string[]) {
       const id = await orders.createCustom(userId, description, wishes, photos);
       const order = await mustGet(id);
       await notifier.systemNotice(`🎨 Новая заявка на свою модель №${id}`);
+      callme?.ringOrder(order);
       await notifier.orderCard(order, "✨ Новая заявка на свою модель");
       if (order.photos.length) await notifier.customPhotos(order);
       return order;

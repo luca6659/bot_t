@@ -5,6 +5,7 @@ export interface Config {
   botToken: string;
   adminGroupId: number;
   adminIds: number[];
+  callmeNumber: string | null;
   databaseUrl: string | null;
   webhookUrl: string | null;
   webhookSecret: string | null;
@@ -35,6 +36,7 @@ export function loadConfig(): Config {
     adminGroupId,
     // Через запятую: только эти люди могут пользоваться админкой. Пусто — любой в группе админов.
     adminIds: (process.env.ADMIN_IDS ?? "").split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0),
+    callmeNumber: process.env.CALLME_NUMBER || null,
     databaseUrl: process.env.DATABASE_URL || null,
     webhookUrl,
     webhookSecret,
